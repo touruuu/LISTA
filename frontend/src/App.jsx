@@ -104,8 +104,23 @@ function CreateAccount({ onBack, onLogin, onContinue }) {
 }
 
 export function App() {
-  const [screen, setScreen] = useState('welcome');
+  const [screen, setScreen] = useState(() => sessionStorage.getItem('lista-authenticated') === 'true' ? 'app' : 'welcome');
   const [startupError, setStartupError] = useState(null);
+  const authenticate = () => {
+    sessionStorage.setItem('lista-authenticated', 'true');
+    setScreen('app');
+  };
+  useEffect(() => {
+    const syncAuthentication = () => {
+      if (sessionStorage.getItem('lista-authenticated') !== 'true') setScreen('welcome');
+    };
+    window.addEventListener('pageshow', syncAuthentication);
+    window.addEventListener('popstate', syncAuthentication);
+    return () => {
+      window.removeEventListener('pageshow', syncAuthentication);
+      window.removeEventListener('popstate', syncAuthentication);
+    };
+  }, []);
   useEffect(() => {
     if (screen !== 'app') return undefined;
     let active = true;
@@ -113,7 +128,7 @@ export function App() {
     return () => { active = false; };
   }, [screen]);
   if (screen === 'welcome') return <Welcome onLogin={() => setScreen('login')} onCreate={() => setScreen('create')} />;
-  if (screen === 'login') return <Login onBack={() => setScreen('welcome')} onCreate={() => setScreen('create')} onContinue={() => setScreen('app')} />;
-  if (screen === 'create') return <CreateAccount onBack={() => setScreen('welcome')} onLogin={() => setScreen('login')} onContinue={() => setScreen('app')} />;
+  if (screen === 'login') return <Login onBack={() => setScreen('welcome')} onCreate={() => setScreen('create')} onContinue={authenticate} />;
+  if (screen === 'create') return <CreateAccount onBack={() => setScreen('welcome')} onLogin={() => setScreen('login')} onContinue={authenticate} />;
   return <><a className="skip" href="#main">Skip to content</a><div id="app">{startupError ? <div className="empty" role="alert"><h1>LISTA could not start</h1><p>{startupError.message}</p></div> : <p className="loading">Loading shared ledger…</p>}</div><dialog id="dialog" /><div id="toast" role="status" aria-live="polite" /></>;
 }

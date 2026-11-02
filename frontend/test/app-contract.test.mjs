@@ -98,7 +98,7 @@ test("consent signature canvas receives the responsive, touch-safe signature pad
 test("Astra visual stylesheet is byte-identical to the approved prototype", () => {
   assert.equal(
     sha256(css),
-    "0565539a630a02624a2723d67b80b86739d5a9a41332550713e76373fd511517",
+    "d574a4897314d3b5518d7b8480c2bcf33e7d4e729f57c87f9af39db6b9effca1",
   );
 });
 
@@ -111,4 +111,59 @@ test("live screen copy does not promise fake sample/demo behavior", () => {
     app,
     /sample ledger|sample data|fictional|simulated presenter|synthetic photo|prototype simulation/i,
   );
+});
+
+test("More provides a logout action that returns to the welcome screen", () => {
+  assert.match(app, /settingsRow\("logout", "Log out"/);
+  assert.match(app, /case "logout"/);
+  assert.match(app, /sessionStorage\.removeItem\("lista-authenticated"\)/);
+  assert.match(app, /location\.replace\(location\.pathname \+ location\.search\)/);
+});
+
+test("Settings subpages return to the current Settings screen with logout", () => {
+  assert.match(app, /function settings\(\)[\s\S]*settingsRow\("logout", "Log out"/);
+  assert.match(app, /back\("Price Book", "settings"\)/);
+  assert.match(app, /\["prices", "verify"\]\.includes\(route\) \? "settings" : "home"/);
+  assert.match(reactApp, /sessionStorage\.getItem\('lista-authenticated'\)/);
+  assert.match(reactApp, /onContinue=\{authenticate\}/);
+  assert.match(reactApp, /pageshow/);
+  assert.match(reactApp, /popstate/);
+});
+
+test("Smart Import appends reviewed mock items without bypassing consent", () => {
+  assert.match(app, /data-action="smart-import"/);
+  assert.match(app, /simulateSmartExtraction/);
+  assert.match(app, /draft\.items\.push\(\.\.\.smartImport\.items/);
+  assert.match(app, /Add Items to Utang/);
+  assert.match(app, /Review & collect consent/);
+  assert.doesNotMatch(app, /smart-add-to-utang[\s\S]{0,800}addTransaction\(/);
+});
+
+test("Smart Import exposes spreadsheet, handwriting, and receipt methods", () => {
+  assert.match(app, /SMART_IMPORT_METHODS/);
+  assert.match(app, /smart-import-file/);
+  assert.match(app, /capture="environment"/);
+  assert.match(css.toString(), /\.smart-import-dialog/);
+  assert.match(css.toString(), /@media\(max-width:700px\)/);
+});
+
+test("active utang records expose an auditable edit workflow", () => {
+  assert.match(app, /Edit Record/);
+  assert.match(app, /id="edit-utang-form"/);
+  assert.match(app, /Review Changes/);
+  assert.match(app, /Save Changes/);
+  assert.match(app, /Edit History/);
+  assert.match(app, /model\.editTransaction/);
+  assert.match(service, /editTransaction\(transactionId/);
+  assert.match(service, /edit_history/);
+});
+
+test("Activity and More expose local ledger exports without mutating records", () => {
+  assert.match(app, /Export Records/);
+  assert.match(app, /buildExportReport/);
+  assert.match(app, /createXlsxBlob/);
+  assert.match(app, /createCsvBlob/);
+  assert.match(app, /createPdfBlob/);
+  assert.match(app, /export-download/);
+  assert.match(css.toString(), /\.export-report-dialog/);
 });

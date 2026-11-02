@@ -188,6 +188,49 @@ test("voided payment and correction do not count as collection today or overdue 
   assert.equal((await ledger.verifyChain()).valid, true);
 });
 
+test("editing an utang preserves payments, updates balances, and records revision history", async () => {
+  const ledger = model();
+  await ledger.ready;
+  const customer = await ledger.addCustomer("Edit Test");
+  const utang = await ledger.addTransaction({
+    customerId: customer.id,
+    type: "utang",
+    amountCents: 10000,
+    lineItems: [{ label: "Rice", quantity: 2, unit_price_cents: 5000 }],
+    dueAt: "2026-10-01",
+    note: "Original",
+    artifactDataUrl,
+  });
+  const payment = await ledger.addTransaction({
+    customerId: customer.id,
+    type: "payment",
+    amountCents: 4000,
+  });
+  const updated = await ledger.editTransaction(utang.id, {
+    amountCents: 12000,
+    lineItems: [{ label: "Rice", quantity: 2, unit_price_cents: 6000 }],
+    dueAt: "2026-10-08",
+    note: "Corrected price",
+    reason: "Receipt showed a different unit price",
+  });
+  assert.equal(updated.id, utang.id);
+  assert.equal(ledger.getCustomer(customer.id).balance_cents, 8000);
+  assert.equal(ledger.getCustomer(customer.id).transactions.length, 2);
+  assert.equal(ledger.getState().transactions.find((tx) => tx.id === payment.id).amount_cents, 4000);
+  assert.equal(updated.edit_history.length, 1);
+  assert.equal(updated.edit_history[0].previous.amount_cents, 10000);
+  assert.equal(updated.edit_history[0].updated.amount_cents, 12000);
+  assert.equal((await ledger.verifyChain()).valid, true);
+  await assert.rejects(
+    ledger.editTransaction(utang.id, {
+      amountCents: 3000,
+      note: "Too low",
+      reason: "Invalid reduction",
+    }),
+    /already has 4000 centavos applied/,
+  );
+});
+
 test("resetSamples restores the sample fixture from a broken chain", async () => {
   const ledger = model();
   await ledger.ready;

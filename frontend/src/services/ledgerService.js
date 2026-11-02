@@ -22,6 +22,7 @@ const HASH_FIELDS = [
   "voided",
   "voids_tx_id",
   "due_at",
+  "edit_history",
 ];
 
 function canonicalize(value) {
@@ -153,6 +154,7 @@ export class LedgerModel {
         due_at,
         voided: false,
         voids_tx_id: null,
+        edit_history: [],
         created_at,
       });
     }
@@ -406,9 +408,101 @@ export class LedgerModel {
         due_at: dueAt || null,
         voided: false,
         voids_tx_id: null,
+        edit_history: [],
         created_at: this._now().toISOString(),
       };
       this.transactions.push(transaction);
+      await this._rebuild();
+      return transaction;
+    });
+  }
+
+  editTransaction(transactionId, {
+    amountCents,
+    lineItems = null,
+    note = "",
+    dueAt = null,
+    reason,
+  }) {
+    return this._mutate(async () => {
+      const transaction = this.transactions.find((tx) => tx.id === transactionId);
+      if (!transaction) throw new Error("Transaction was not found.");
+      if (transaction.type !== "utang")
+        throw new Error("Only utang records can be edited.");
+      if (transaction.voided || transaction.voids_tx_id)
+        throw new Error("Voided and correction records cannot be edited.");
+      ensureIntegerCents(amountCents);
+      const cleanReason = String(reason ?? "").trim();
+      if (!cleanReason) throw new Error("A reason for editing is required.");
+      const items = lineItems == null ? null : copy(lineItems);
+      if (
+        items &&
+        (!Array.isArray(items) ||
+          !items.length ||
+          items.some(
+            (item) =>
+              !String(item.label ?? "").trim() ||
+              !Number.isSafeInteger(item.quantity) ||
+              item.quantity <= 0 ||
+              !Number.isSafeInteger(item.unit_price_cents) ||
+              item.unit_price_cents <= 0,
+          ))
+      )
+        throw new TypeError("Each item needs a name, positive quantity, and positive integer-centavo unit price.");
+      if (items) {
+        const itemTotal = items.reduce((sum, item) => {
+          const rowTotal = item.quantity * item.unit_price_cents;
+          const next = sum + rowTotal;
+          if (!Number.isSafeInteger(rowTotal) || !Number.isSafeInteger(next))
+            throw new RangeError("Item total exceeds the safe integer-centavo range.");
+          return next;
+        }, 0);
+        if (itemTotal !== amountCents)
+          throw new Error("Itemized total must equal amountCents.");
+      }
+      const correctionIds = new Set(
+        this.transactions.filter((tx) => tx.voids_tx_id).map((tx) => tx.voids_tx_id),
+      );
+      const lots = [];
+      for (const tx of this.transactions.filter((row) => row.customer_id === transaction.customer_id)) {
+        if (tx.voided || tx.voids_tx_id || correctionIds.has(tx.id)) continue;
+        if (tx.type === "utang") lots.push({ id: tx.id, original: tx.amount_cents, remaining: tx.amount_cents });
+        else {
+          let payment = tx.amount_cents;
+          for (const lot of lots) {
+            const applied = Math.min(payment, lot.remaining);
+            lot.remaining -= applied;
+            payment -= applied;
+            if (!payment) break;
+          }
+        }
+      }
+      const targetLot = lots.find((lot) => lot.id === transactionId);
+      const paidCents = targetLot ? targetLot.original - targetLot.remaining : 0;
+      if (amountCents < paidCents)
+        throw new Error(`This record already has ${paidCents} centavos applied in payments. Its edited total cannot be lower than that amount.`);
+      const previous = {
+        amount_cents: transaction.amount_cents,
+        line_items: copy(transaction.line_items),
+        due_at: transaction.due_at,
+        note: transaction.note,
+      };
+      transaction.amount_cents = amountCents;
+      transaction.line_items = items;
+      transaction.due_at = dueAt || null;
+      transaction.note = String(note ?? "").trim() || null;
+      transaction.edit_history ||= [];
+      transaction.edit_history.push({
+        edited_at: this._now().toISOString(),
+        reason: cleanReason,
+        previous,
+        updated: {
+          amount_cents: transaction.amount_cents,
+          line_items: copy(transaction.line_items),
+          due_at: transaction.due_at,
+          note: transaction.note,
+        },
+      });
       await this._rebuild();
       return transaction;
     });
@@ -437,6 +531,7 @@ export class LedgerModel {
         due_at: null,
         voided: false,
         voids_tx_id: original.id,
+        edit_history: [],
         created_at: this._now().toISOString(),
       };
       this.transactions.push(correction);
@@ -620,6 +715,7 @@ export function createLedgerService(options) {
           : null,
       }),
     voidTransaction: (id) => ledger.voidTransaction(id),
+    editTransaction: (id, changes) => ledger.editTransaction(id, changes),
     hardDeleteTransaction: (id) => ledger.hardDeleteTransaction(id),
     setPrice: (label, cents) => ledger.setPrice(label, cents),
     deletePrice: (label) => ledger.deletePrice(label),
