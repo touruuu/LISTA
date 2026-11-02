@@ -103,7 +103,8 @@ let route = "home",
   cameraActive = false,
   evidenceUrl = null,
   smartImport = null,
-  exportState = null;
+  exportState = null,
+  accountName = localStorage.getItem("lista-account-name") || localStorage.getItem("lista-store-display-name") || "My LISTA Account";
 const customer = (id) => model.getCustomer(id);
 const current = () => customer(cid);
 const txs = (id) =>
@@ -122,11 +123,12 @@ const txLabel = (t) =>
         : t.due_at && t.due_at < today()
           ? "Past due date"
           : "Utang";
-function toast(text) {
-  $("#toast").textContent = text;
-  $("#toast").classList.add("show");
+function toast(text, kind = "success") {
+  const target = $("#toast");
+  target.textContent = text;
+  target.className = `show ${kind}`;
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => $("#toast").classList.remove("show"), 4200);
+  toast.timer = setTimeout(() => { target.className = ""; }, 4200);
 }
 function go(r, id) {
   const next = r + (id ? "/" + encodeURIComponent(id) : "");
@@ -568,7 +570,7 @@ function record() {
             "",
           )}</datalist><div class="item-actions"><button type="button" class="btn" data-action="add-item">${icon("plus")}Add item</button><button type="button" class="btn smart-import-trigger" data-action="smart-import">${icon("download")}Smart Import</button></div><p class="small muted" style="margin:15px 0 8px">Suggested from Price Book</p><div class="filter-row">${model
           .getPriceBook()
-          .slice(0, 3)
+          .slice(0, 6)
           .map(
             (p, i) =>
               `<button type="button" class="chip" data-action="suggestion" data-index="${i}">${esc(p.label)} · ${money(p.unit_price_cents)}</button>`,
@@ -639,7 +641,13 @@ function payment() {
     draft = { type: "payment", customerId: cid || "", amount: "", note: "" };
   const bal = balance(draft.customerId),
     amount = parseCents(draft.amount) || 0;
-  return `<div class="narrow">${back("Record payment", cid ? "detail/" + cid : "home")}<form id="payment-form">${customerSelect(draft.customerId)}<div class="field-group"><label for="payment-amount">Payment amount · ₱</label><input id="payment-amount" class="amount-input" type="number" min="0.01" step="0.01" max="9999999" value="${esc(draft.amount)}" placeholder="0.00" required></div><div class="filter-row">${[50000, 100000, Math.max(0, Math.round(bal / 2)), Math.max(0, bal)].map((v, i) => `<button type="button" class="chip" data-action="payment-quick" data-value="${v}" ${!v ? "disabled" : ""}>${i === 2 ? "Half" : i === 3 ? "Full balance" : money(v)}</button>`).join("")}</div><div class="field-group"><label for="note">Note <span class="muted">(optional)</span></label><textarea id="note" placeholder="e.g. Paid at the store" maxlength="300">${esc(draft.note)}</textarea></div><div class="totals"><div class="between"><span class="muted">Current balance</span><span>${bal < 0 ? "Credit " : ""}${money(bal)}</span></div><div class="between"><span class="muted">Payment</span><span id="payment-preview">−${money(amount)}</span></div><div class="between total"><span>New balance</span><strong id="payment-result">${bal - amount < 0 ? "Credit " : ""}${money(bal - amount)}</strong></div></div><p class="small muted" style="margin-top:13px">Payments do not require photo or signature consent.</p><p id="form-error" class="error-text" role="alert"></p><button class="btn primary wide form-footer" type="submit">${icon("check")}Confirm payment</button></form></div>`;
+  const quickAmounts = [
+    [50000, money(50000)],
+    [100000, money(100000)],
+    [Math.max(0, Math.round(bal / 2)), "Half Balance"],
+    [Math.max(0, bal), "Full Balance"],
+  ];
+  return `<div class="narrow">${back("Record payment", cid ? "detail/" + cid : "home")}<form id="payment-form">${customerSelect(draft.customerId)}<div class="field-group"><label for="payment-amount">Payment amount · ₱</label><input id="payment-amount" class="amount-input" type="number" min="0.01" step="0.01" max="9999999" value="${esc(draft.amount)}" placeholder="0.00" required></div><div class="filter-row payment-shortcuts" aria-label="Quick payment amounts">${quickAmounts.map(([value, label]) => `<button type="button" class="chip" data-action="payment-quick" data-value="${value}" ${!value ? "disabled" : ""}>${label}</button>`).join("")}</div><div class="field-group"><label for="note">Note <span class="muted">(optional)</span></label><textarea id="note" placeholder="e.g. Paid at the store" maxlength="300">${esc(draft.note)}</textarea></div><div class="totals"><div class="between"><span class="muted">Current balance</span><span>${bal < 0 ? "Credit " : ""}${money(bal)}</span></div><div class="between"><span class="muted">Payment</span><span id="payment-preview">−${money(amount)}</span></div><div class="between total"><span>New balance</span><strong id="payment-result">${bal - amount < 0 ? "Credit " : ""}${money(bal - amount)}</strong></div></div><p class="small muted" style="margin-top:13px">Payments do not require photo or signature consent.</p><p id="form-error" class="error-text" role="alert"></p><button class="btn primary wide form-footer" type="submit">${icon("check")}Review payment</button></form></div>`;
 }
 function consent() {
   if (!draft || !draft.total)
@@ -781,7 +789,7 @@ function bindCamera() {
     stopCamera(cameraStream, video);
     cameraStream = null;
     render();
-    toast(error.message || "Camera playback failed. Retry capture.");
+    toast(error.message || "Camera playback failed. Retry capture.", "error");
   });
 }
 async function startCamera() {
@@ -797,7 +805,7 @@ async function startCamera() {
     cameraActive = false;
     cameraError = true;
     render();
-    toast(error.message || "Camera unavailable. No utang was saved.");
+    toast(error.message || "Camera unavailable. No utang was saved.", "error");
   }
 }
 function capturePhoto() {
@@ -819,7 +827,7 @@ function capturePhoto() {
     photo = null;
     cameraError = true;
     render();
-    toast(error.message || "Photo capture failed. Retry the camera.");
+    toast(error.message || "Photo capture failed. Retry the camera.", "error");
   }
 }
 function canvasBlob(canvas, type, quality) {
@@ -887,10 +895,11 @@ function success() {
 const settingsRow = (i, title, sub, action) =>
   `<button class="settings-row" data-action="${action}"><span class="stat-icon">${icon(i)}</span><span class="grow"><b>${title}</b><span class="muted" style="display:block">${sub}</span></span>${icon("arrow")}</button>`;
 function more() {
-  return `<div class="narrow"><div class="page-heading"><div><h1>More</h1><p class="muted">Settings and ledger tools.</p></div></div><div class="more-profile"><span class="avatar big">${icon("shield")}</span><div><h2>Frontend prototype</h2><p>Temporary data for frontend development</p></div></div><div class="card more-links">${settingsRow("clock", "Reminders", "Review upcoming and overdue balances", "reminders")}${settingsRow("download", "Export Records", "Download Excel, CSV, or PDF reports", "export-records")}${settingsRow("lock", "PIN lock", pin ? "PIN is set for this tab" : "Protect this screen on this device", "pin")}${settingsRow("tag", "Price Book", "Item and price suggestions", "prices")}</div><div class="card more-links">${settingsRow("settings", "Settings", "Local preview preferences", "open-settings")}${settingsRow("shield", "Ledger integrity", "Verify the local transaction chain", "verify")}${settingsRow("book", "About LISTA", "How this frontend preview works", "about")}</div><div class="card more-links">${settingsRow("logout", "Log out", "Return to the LISTA welcome screen", "logout")}</div><p class="sync-status"><i class="dot"></i>Temporary local session</p></div>`;
+  return `<div class="narrow"><div class="page-heading"><div><h1>More</h1><p class="muted">Settings and ledger tools.</p></div></div><div class="more-profile"><span class="avatar big">${icon("shield")}</span><div><h2>${esc(accountName)}</h2><p>LISTA · Temporary local data</p></div></div><div class="card more-links">${settingsRow("clock", "Reminders", "Review upcoming and overdue balances", "reminders")}${settingsRow("download", "Export Records", "Download Excel, CSV, or PDF reports", "export-records")}${settingsRow("tag", "Price Book", "Item and price suggestions", "prices")}</div><div class="card more-links">${settingsRow("settings", "Settings", "Account, security, data, and app preferences", "open-settings")}${settingsRow("book", "Quick guide", "Learn the essential LISTA workflow", "guide")}</div><div class="card more-links">${settingsRow("logout", "Log out", "Return to the LISTA welcome screen", "logout")}</div><p class="sync-status"><i class="dot"></i>Temporary local session</p></div>`;
 }
 function settings() {
-  return `<div class="narrow"><div class="page-heading"><div><h1>Settings</h1><p class="muted">Frontend preview preferences and tools.</p></div></div><div class="balance-card between" style="margin-bottom:20px"><div><h2>Frontend prototype</h2><p class="muted small" style="margin-top:6px">Data resets when the page reloads</p></div><span class="avatar">${icon("shield")}</span></div><div class="card">${settingsRow("lock", "Local device PIN", pin ? "PIN set for this tab · Lock or remove" : "Set a four-digit device PIN", "pin")}${settingsRow("tag", "Price Book", "Saved item prices for quicker itemized utang", "prices")}${settingsRow("shield", "Ledger integrity", "Verify the local transaction chain", "verify")}</div><div class="section-head"><h2>About LISTA</h2></div><div class="card">${settingsRow("home", "Add a home-screen shortcut", "Use the browser menu to add LISTA to your home screen", "install")}${settingsRow("book", "How LISTA works", "Frontend-only preview with temporary data", "about")}</div><div class="card more-links" style="margin-top:14px">${settingsRow("logout", "Log out", "Return to the LISTA welcome screen", "logout")}</div>${note("The backend is intentionally not implemented. Temporary data is isolated in the frontend service layer.")}</div>`;
+  const group = (title, rows) => `<section class="settings-group"><div class="section-head"><h2>${title}</h2></div><div class="card">${rows}</div></section>`;
+  return `<div class="narrow"><div class="page-heading"><div><h1>Settings</h1><p class="muted">Manage this account view and local app preferences.</p></div></div><div class="balance-card between settings-hero"><div><span class="eyebrow">Account name</span><h2>${esc(accountName)}</h2><p class="muted small">Saved on this browser only</p></div><span class="avatar">${icon("shield")}</span></div>${group("Account", settingsRow("edit", "Account name", accountName, "account-name") + settingsRow("tag", "Price Book", "Saved item prices for quicker itemized utang", "prices"))}${group("Security", settingsRow("lock", "Local device PIN", pin ? "PIN set for this tab · Lock or remove" : "Set a four-digit device PIN", "pin") + settingsRow("shield", "Ledger integrity", "Verify the local transaction chain", "verify"))}${group("Data & Reports", settingsRow("download", "Export Records", "Download Excel, CSV, or PDF reports", "export-records") + settingsRow("clock", "Reminders", "Review upcoming and overdue balances", "reminders"))}${group("App Preferences", settingsRow("home", "Install LISTA", "Android and iPhone home-screen instructions", "install") + settingsRow("book", "Quick guide", "Review the essential LISTA workflow", "guide") + settingsRow("book", "About LISTA", "How this frontend preview works", "about"))}<div class="card more-links settings-logout">${settingsRow("logout", "Log out", "Return to the LISTA welcome screen", "logout")}</div>${note("The account name is a browser preference. Ledger data remains temporary and resets when the page reloads.")}</div>`;
 }
 function verify() {
   const s = model.getState(),
@@ -1022,9 +1031,9 @@ function dialogError(e) {
   }
   el.textContent = e.message || String(e);
 }
-function confirmDialog({ title, text, label, work }) {
+function confirmDialog({ title, text, label, work, kind = "warning", details = "" }) {
   modal(
-    `<h2>${title}</h2><p>${text}</p><div class="actions">${btn("Cancel", "close-dialog")}${btn(label, "confirm-danger", "danger")}</div>`,
+    `<div class="confirm-dialog ${kind}"><span class="confirm-icon">${icon(kind === "danger" ? "alert" : "shield")}</span><h2>${title}</h2><p>${text}</p>${details}${note(kind === "danger" ? "This action cannot be undone. Review the details before continuing." : "The ledger will preserve an auditable record of this change.", kind === "danger" ? "error" : "warning")}<p id="dialog-error" class="error-text" role="alert"></p><div class="actions">${btn("Keep record", "close-dialog")}${btn(label, "confirm-danger", kind === "danger" ? "danger" : "primary")}</div></div>`,
   );
   $('#dialog [data-action="confirm-danger"]').onclick = async (e) => {
     const button = e.currentTarget;
@@ -1096,7 +1105,7 @@ async function share() {
     );
     $("#share-link").onclick = (event) => event.target.select();
   } catch (error) {
-    toast(error.message || "Could not create statement link.");
+    toast(error.message || "Could not create statement link.", "error");
   }
 }
 async function action(name, el) {
@@ -1402,6 +1411,27 @@ async function action(name, el) {
       }
       break;
     }
+    case "confirm-payment": {
+      if (!draft || draft.type !== "payment" || busy) break;
+      const amount = parseCents(draft.amount), person = customer(draft.customerId);
+      if (!person || !(amount > 0)) return dialogError(Error("Payment details are no longer available."));
+      busy = true;
+      const button = el;
+      button.disabled = true;
+      try {
+        lastSaved = await model.addTransaction({ customerId: draft.customerId, type: "payment", amountCents: amount, note: draft.note });
+        cid = draft.customerId;
+        draft = null;
+        closeModal();
+        go("success");
+      } catch (error) {
+        dialogError(error);
+        button.disabled = false;
+      } finally {
+        busy = false;
+      }
+      break;
+    }
     case "evidence": {
       const id = el.dataset.id,
         tx = model.getState().transactions.find((row) => row.id === id);
@@ -1414,7 +1444,7 @@ async function action(name, el) {
           `<h2>Saved consent record</h2><p>One composite photo and signature is attached to this transaction.</p><img class="evidence" src="${evidenceUrl}" alt="Saved photo and customer signature"><div class="hash">Artifact SHA-256<br>${esc(tx.artifact_hash || "Not available")}</div>`,
         );
       } catch (error) {
-        toast(error.message || "Could not load consent evidence.");
+        toast(error.message || "Could not load consent evidence.", "error");
       }
       break;
     }
@@ -1423,9 +1453,10 @@ async function action(name, el) {
         tx = model.getState().transactions.find((row) => row.id === id);
       if (!tx) return;
       confirmDialog({
-        title: "Void this transaction?",
-        text: `The original ${money(tx.amount_cents)} stays visible and is marked Voided. A separate offsetting correction is added to the ledger.`,
-        label: "Confirm void",
+        title: "Void and add a correction?",
+        text: `This will not erase the original transaction. LISTA will mark it Voided and append a separate offsetting correction.`,
+        details: `<div class="confirmation-summary"><div><span>Customer</span><b>${esc(customer(tx.customer_id)?.name || "Unknown customer")}</b></div><div><span>Transaction</span><b>${txLabel(tx)} · ${money(tx.amount_cents)}</b></div><div><span>Result</span><b>Original preserved</b></div></div>`,
+        label: "Void & add correction",
         work: async () => {
           await model.voidTransaction(id);
           toast("Original preserved; correction appended.");
@@ -1439,6 +1470,7 @@ async function action(name, el) {
         title: "Permanently delete transaction?",
         text: "This removes the selected transaction and its consent artifact. This cannot be undone.",
         label: "Delete permanently",
+        kind: "danger",
         work: async () => {
           await model.hardDeleteTransaction(id);
           toast("Transaction permanently deleted.");
@@ -1453,6 +1485,7 @@ async function action(name, el) {
         title: "Delete " + esc(c.name) + "?",
         text: `This permanently removes the customer and all ${c.transactions.length} transactions and consent artifacts. This cannot be undone.`,
         label: "Delete customer",
+        kind: "danger",
         work: async () => {
           await model.deleteCustomer(c.id);
           go("home");
@@ -1502,9 +1535,26 @@ async function action(name, el) {
       verifyResult = await model.verifyChain();
       render();
       break;
+    case "account-name":
+      modal(`<h2>Edit account name</h2><p>This label customizes LISTA on this browser. It does not change ledger records or authentication details.</p><form id="account-name-form"><div class="field-group"><label for="account-name">Account name</label><input id="account-name" maxlength="60" required value="${esc(accountName)}" placeholder="e.g. Rosa Dela Cruz"></div><p id="dialog-error" class="error-text" role="alert"></p><button class="btn primary wide" type="submit">Save account name</button></form>`);
+      $("#account-name-form").onsubmit = (event) => {
+        event.preventDefault();
+        const value = $("#account-name").value.trim();
+        if (!value) return dialogError(Error("Enter an account name."));
+        accountName = value;
+        localStorage.setItem("lista-account-name", value);
+        closeModal();
+        render();
+        toast("Account name updated.");
+      };
+      break;
+    case "guide":
+      localStorage.setItem("lista-guide-seen", "1");
+      modal(`<div class="guide-dialog"><span class="eyebrow">LISTA quick guide</span><h2>Clear records in four steps</h2><ol class="guide-steps"><li><span>1</span><div><b>Add a customer</b><small>Create one ledger for each person.</small></div></li><li><span>2</span><div><b>Record utang</b><small>Add items or a cash amount, then collect photo and signature consent.</small></div></li><li><span>3</span><div><b>Record payments</b><small>Use Half Balance or Full Balance shortcuts, then review before saving.</small></div></li><li><span>4</span><div><b>Review and export</b><small>Use Activity, Reminders, and Export Records to check the ledger.</small></div></li></ol>${note("Voiding preserves the original record and adds a correction. Reports and customer histories remain available in this session.")}</div>`);
+      break;
     case "install":
       modal(
-        `<h2>Keep LISTA close</h2><p>Use your browser menu to choose Add to Home Screen. This frontend currently uses temporary in-memory data.</p>`,
+        `<div class="install-dialog"><span class="eyebrow">Install LISTA</span><h2>Keep LISTA on your home screen</h2><div class="install-options"><section><b>Android · Chrome</b><ol><li>Open the browser menu (⋮).</li><li>Choose <strong>Install app</strong> or <strong>Add to Home screen</strong>.</li><li>Confirm the shortcut.</li></ol></section><section><b>iPhone or iPad · Safari</b><ol><li>Tap the Share button.</li><li>Choose <strong>Add to Home Screen</strong>.</li><li>Tap <strong>Add</strong>.</li></ol></section></div>${note("Installing adds a convenient shortcut. It does not make temporary ledger data persistent or enable offline storage.", "warning")}</div>`,
       );
       break;
     case "about":
@@ -1713,24 +1763,8 @@ function bind() {
           "Choose a customer and enter a valid payment amount.";
         return;
       }
-      busy = true;
-      f.querySelector('[type="submit"]').disabled = true;
-      try {
-        lastSaved = await model.addTransaction({
-          customerId: draft.customerId,
-          type: "payment",
-          amountCents: amount,
-          note: draft.note,
-        });
-        cid = draft.customerId;
-        draft = null;
-        go("success");
-      } catch (e) {
-        $("#form-error").textContent = e.message;
-        f.querySelector('[type="submit"]').disabled = false;
-      } finally {
-        busy = false;
-      }
+      const person = customer(draft.customerId), remaining = balance(draft.customerId) - amount;
+      modal(`<div class="confirm-dialog"><span class="confirm-icon">${icon("pay")}</span><span class="eyebrow">Review payment</span><h2>Confirm this payment?</h2><p>Check the customer and amount before adding the payment to the ledger.</p><div class="confirmation-summary"><div><span>Customer</span><b>${esc(person.name)}</b></div><div><span>Payment</span><b>${money(amount)}</b></div><div><span>Remaining balance</span><b>${remaining < 0 ? "Credit " : ""}${money(remaining)}</b></div>${draft.note ? `<div><span>Note</span><b>${esc(draft.note)}</b></div>` : ""}</div>${note("Payments do not require photo or signature consent. The saved transaction will appear in the customer history.")}<p id="dialog-error" class="error-text" role="alert"></p><div class="actions"><button class="btn" data-action="close-dialog">Go back</button><button class="btn primary" data-action="confirm-payment">${icon("check")}Save payment</button></div></div>`);
     };
   }
   if ($("#unlock-form"))
@@ -1797,3 +1831,5 @@ window.addEventListener("pagehide", () => {
 await model.ready;
 loading = false;
 readRoute();
+if (!localStorage.getItem("lista-guide-seen"))
+  setTimeout(() => action("guide", document.createElement("button")), 250);

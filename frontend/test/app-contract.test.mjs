@@ -95,11 +95,27 @@ test("consent signature canvas receives the responsive, touch-safe signature pad
   );
 });
 
-test("Astra visual stylesheet is byte-identical to the approved prototype", () => {
+test("Astra visual stylesheet matches the approved LISTA enhancement baseline", () => {
   assert.equal(
     sha256(css),
-    "1eba7ad7bfc960a6013e8b2fa1ef4d78519da18750c97505d13044f43fbbdd2a",
+    "e3007b1f2932592b86dd8d9d92e7c7e565fb1ab1756515f9362209546d016cc3",
   );
+});
+
+test("payments require a customer-facing review before the ledger write", () => {
+  assert.match(app, /Half Balance/);
+  assert.match(app, /Full Balance/);
+  assert.match(app, /data-action="confirm-payment"/);
+  assert.match(app, /Remaining balance/);
+});
+
+test("Settings groups lightweight account and app preferences without ledger changes", () => {
+  for (const heading of ["Account", "Security", "Data & Reports", "App Preferences"])
+    assert.match(app, new RegExp(heading.replace("&", "&amp;|&")));
+  assert.match(app, /lista-account-name/);
+  assert.match(app, /LISTA quick guide/);
+  assert.match(app, /Android · Chrome/);
+  assert.match(app, /iPhone or iPad · Safari/);
 });
 
 test("real ledger metadata does not identify the page as a sample ledger", () => {
