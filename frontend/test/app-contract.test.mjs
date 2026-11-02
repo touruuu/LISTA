@@ -98,7 +98,7 @@ test("consent signature canvas receives the responsive, touch-safe signature pad
 test("Astra visual stylesheet is byte-identical to the approved prototype", () => {
   assert.equal(
     sha256(css),
-    "d574a4897314d3b5518d7b8480c2bcf33e7d4e729f57c87f9af39db6b9effca1",
+    "1eba7ad7bfc960a6013e8b2fa1ef4d78519da18750c97505d13044f43fbbdd2a",
   );
 });
 
@@ -166,4 +166,10 @@ test("Activity and More expose local ledger exports without mutating records", (
   assert.match(app, /createPdfBlob/);
   assert.match(app, /export-download/);
   assert.match(css.toString(), /\.export-report-dialog/);
+});
+
+test("password visibility controls are centered and cannot overlap input text", () => {
+  assert.match(reactApp, /className="password-field"/);
+  assert.match(css.toString(), /\.password-field input\{padding-right:72px\}/);
+  assert.match(css.toString(), /\.password-field button\{top:50%;bottom:auto;transform:translateY\(-50%\);display:flex;align-items:center;justify-content:center\}/);
 });
