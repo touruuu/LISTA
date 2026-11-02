@@ -94,13 +94,16 @@ function balanceDelta(transaction) {
 }
 
 export class LedgerModel {
-  constructor({ now = () => new Date(), idFactory } = {}) {
+  constructor({ now = () => new Date(), idFactory, storage = null, storageKey = "", seed = null } = {}) {
     this._now = now;
     this._idFactory =
       idFactory || ((prefix) => `${prefix}-${globalThis.crypto.randomUUID()}`);
     this._queue = Promise.resolve();
     this._tampered = new Map();
     this._revision = 0;
+    this._storage = storage;
+    this._storageKey = storageKey;
+    this._customSeed = seed;
     this.ready = this._seed();
   }
 
@@ -111,6 +114,7 @@ export class LedgerModel {
         throw new Error("Restore the demo chain before making another change.");
       const value = await work();
       this._revision += 1;
+      this._persist();
       return copy(value);
     });
     this._queue = result.catch(() => undefined);
@@ -118,6 +122,28 @@ export class LedgerModel {
   }
 
   async _seed() {
+    if (this._storage && this._storageKey) {
+      try {
+        const saved = JSON.parse(this._storage.getItem(this._storageKey) || "null");
+        if (saved?.customers && saved?.transactions && saved?.prices) {
+          this.customers = copy(saved.customers);
+          this.transactions = copy(saved.transactions);
+          this.prices = copy(saved.prices);
+          this.statements = copy(saved.statements || {});
+          await this._rebuild();
+          return;
+        }
+      } catch { this._storage.removeItem(this._storageKey); }
+    }
+    if (this._customSeed) {
+      this.customers = copy(this._customSeed.customers);
+      this.transactions = copy(this._customSeed.transactions);
+      this.prices = copy(this._customSeed.prices);
+      this.statements = copy(this._customSeed.statements || {});
+      await this._rebuild();
+      this._persist();
+      return;
+    }
     this.customers = SAMPLE_CUSTOMERS.map(([id, name]) => ({
       id,
       name,
@@ -159,6 +185,11 @@ export class LedgerModel {
       });
     }
     await this._rebuild();
+  }
+
+  _persist() {
+    if (!this._storage || !this._storageKey) return;
+    this._storage.setItem(this._storageKey, JSON.stringify({ customers: this.customers, transactions: this.transactions, prices: this.prices, statements: this.statements }));
   }
 
   async _rebuild() {

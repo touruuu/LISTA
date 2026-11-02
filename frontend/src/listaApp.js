@@ -2,7 +2,19 @@ import { createLedgerService } from "./services/ledgerService.js";
 import { openCamera, stopCamera, captureFrame } from "./lib/camera.js";
 import { SMART_IMPORT_METHODS, simulateSmartExtraction } from "./services/smartItemImport.js";
 import { buildExportReport, createCsvBlob, createPdfBlob, createXlsxBlob, defaultExportFilters, downloadBlob, exportFilename } from "./services/exportRecords.js";
-let model = createLedgerService();
+import { buildReceiptData, drawQrPayload, drawReceiptImage, drawReceiptQr, receiptPayload } from "./services/receiptService.js";
+import { createBorrowerPortalDemo } from "./data/borrowerPortalDemo.js";
+import jsQR from "jsqr";
+import { addScannedReceipt, parseListaReceiptPayload } from "./services/borrowerPortalService.js";
+import { createPaymentQrPayload, outstandingForUtang, parsePaymentQrPayload, validatePaymentRequest } from "./services/paymentQrService.js";
+import { accountLinkService, createAccountLinkPayload, parseAccountLinkPayload } from "./services/accountLinkService.js";
+import { DEMO_BORROWER, DEMO_LEDGER_KEY, DEMO_LEDGER_SEED, DEMO_STORE_NAME } from "./data/demoAccount.js";
+const demoMode = sessionStorage.getItem("lista-demo-mode") === "true";
+let model = createLedgerService(demoMode ? { storage: localStorage, storageKey: DEMO_LEDGER_KEY, seed: DEMO_LEDGER_SEED } : undefined);
+const readDemoProcessedPayments = () => { try { return JSON.parse(localStorage.getItem("lista-demo-processed-payments") || "[]"); } catch { return []; } };
+const borrowerDemo = createBorrowerPortalDemo();
+const storeId = localStorage.getItem("lista-local-store-id") || `LOCAL-${globalThis.crypto.randomUUID()}`;
+localStorage.setItem("lista-local-store-id", storeId);
 const $ = (s) => document.querySelector(s),
   esc = (v) =>
     String(v ?? "").replace(
@@ -66,6 +78,7 @@ const icons = {
   trash: "M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7",
   logout: "M9 3H3v18h6M9 12h12m-5-5 5 5-5 5",
   book: "M4 3h16v18H4ZM8 3v18M12 8h4M12 12h4",
+  print: "M6 9V3h12v6M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M6 14h12v7H6Z",
 };
 const icon = (n) =>
   `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="${icons[n] || icons.book}"/></svg>`;
@@ -104,7 +117,21 @@ let route = "home",
   evidenceUrl = null,
   smartImport = null,
   exportState = null,
-  accountName = localStorage.getItem("lista-account-name") || localStorage.getItem("lista-store-display-name") || "My LISTA Account";
+  receiptTransactionId = null,
+  receiptImageCanvas = null,
+  borrowerScannedReceipts = [],
+  borrowerScan = { phase: "idle", receipt: null, error: "" },
+  borrowerScannerStream = null,
+  borrowerScanFrame = 0,
+  borrowerPaymentDraft = null,
+  borrowerMappedCustomerId = demoMode ? DEMO_BORROWER.id : null,
+  borrowerPaymentQr = null,
+  processedPaymentRequestIds = new Set(demoMode ? readDemoProcessedPayments() : []),
+  ownerPaymentScan = null,
+  accountLinkScan = null,
+  borrowerAccountQr = null,
+  accountQrTimer = 0,
+  accountName = demoMode ? DEMO_STORE_NAME : localStorage.getItem("lista-account-name") || localStorage.getItem("lista-store-display-name") || "My LISTA Account";
 const customer = (id) => model.getCustomer(id);
 const current = () => customer(cid);
 const txs = (id) =>
@@ -148,9 +175,15 @@ function shell(content) {
       "verify",
       "prices",
       "reminders",
+      "borrower-portal",
     ].includes(route),
     activityActive = route === "activity";
   return `<div class="shell"><aside class="sidebar"><a class="brand" href="#home"><span class="brand-mark">L</span>LISTA</a><p class="brand-sub">Malinaw ang bawat tala.</p><nav class="side-nav" aria-label="Main navigation">${navLink("home", "Home", "home")}${navLink("people", "People", "people")}${navLink("record", "Record utang", "plus")}${navLink("activity", "Activity", "clock")}${navLink("more", "More", "more")}</nav><div class="side-bottom"><div class="view-note">${icon("book")}<span>Simple, malinaw,<br>laging updated.</span></div><p class="side-note">Frontend preview<br>Temporary local data</p></div></aside><header class="topbar"><div class="mobile-brand"><span class="brand-mark">L</span>LISTA</div><div class="topbar-left"><span><i class="dot"></i>Frontend preview</span><span> / &nbsp; Local session</span></div></header><main class="main" id="main">${content}</main><nav class="bottom-nav ${["record", "edit", "payment", "consent", "success"].includes(route) ? "hide-on-form" : ""}" aria-label="Mobile navigation"><a href="#home" class="${route === "home" ? "active" : ""}">${icon("home")}<span>Home</span></a><a href="#people" class="${route === "people" || route === "detail" ? "active" : ""}">${icon("people")}<span>People</span></a><a href="#record" class="record-nav"><span class="record-circle">${icon("plus")}</span><span>Record</span></a><a href="#activity" class="${activityActive ? "active" : ""}">${icon("clock")}<span>Activity</span></a><a href="#more" class="${moreActive ? "active" : ""}">${icon("more")}<span>More</span></a></nav></div>`;
+}
+const borrowerRoutes = new Set(["borrower-home", "borrower-utang", "borrower-scan", "borrower-payments", "borrower-receipts"]);
+function borrowerShell(content) {
+  const link = (target, label, glyph) => `<a href="#${target}" class="${route === target ? "active" : ""}">${icon(glyph)}<span>${label}</span></a>`;
+  return `<div class="borrower-app"><header class="borrower-topbar"><span></span><span class="borrower-logo"><span class="brand-mark">L</span>LISTA</span><span class="demo-pill">DEMO</span></header><main class="borrower-main" id="main">${content}</main><nav class="borrower-nav" aria-label="Borrower navigation">${link("borrower-home", "Home", "home")}${link("borrower-utang", "My Utang", "bag")}<a href="#borrower-scan" class="borrower-scan-nav ${route === "borrower-scan" ? "active" : ""}"><span class="borrower-scan-circle">${icon("camera")}</span><span>Scan QR</span></a>${link("borrower-payments", "Payments", "pay")}${link("borrower-receipts", "Receipts", "book")}</nav></div>`;
 }
 function empty(title, text, button = "") {
   return `<div class="empty"><div class="stat-icon">${icon("people")}</div><h3>${title}</h3><p>${text}</p>${button}</div>`;
@@ -180,15 +213,23 @@ function render() {
       settings: settings,
       verify: verify,
       prices: prices,
+      "borrower-portal": borrowerPortal,
+      "borrower-home": borrowerHome,
+      "borrower-utang": borrowerUtang,
+      "borrower-scan": borrowerScanner,
+      "borrower-payments": borrowerPayments,
+      "borrower-receipts": borrowerReceipts,
     };
     content = (screens[route] || home)();
   }
-  $("#app").innerHTML = shell(content);
+  $("#app").innerHTML = borrowerRoutes.has(route) ? borrowerShell(content) : shell(content);
   bind();
   if (route === "consent") {
     bindCanvas();
     bindCamera();
   }
+  if (route === "borrower-scan") bindBorrowerScanner();
+  if (route === "borrower-payments") bindBorrowerPaymentForms();
 }
 function home() {
   const d = model.getDashboard(),
@@ -647,7 +688,7 @@ function payment() {
     [Math.max(0, Math.round(bal / 2)), "Half Balance"],
     [Math.max(0, bal), "Full Balance"],
   ];
-  return `<div class="narrow">${back("Record payment", cid ? "detail/" + cid : "home")}<form id="payment-form">${customerSelect(draft.customerId)}<div class="field-group"><label for="payment-amount">Payment amount · ₱</label><input id="payment-amount" class="amount-input" type="number" min="0.01" step="0.01" max="9999999" value="${esc(draft.amount)}" placeholder="0.00" required></div><div class="filter-row payment-shortcuts" aria-label="Quick payment amounts">${quickAmounts.map(([value, label]) => `<button type="button" class="chip" data-action="payment-quick" data-value="${value}" ${!value ? "disabled" : ""}>${label}</button>`).join("")}</div><div class="field-group"><label for="note">Note <span class="muted">(optional)</span></label><textarea id="note" placeholder="e.g. Paid at the store" maxlength="300">${esc(draft.note)}</textarea></div><div class="totals"><div class="between"><span class="muted">Current balance</span><span>${bal < 0 ? "Credit " : ""}${money(bal)}</span></div><div class="between"><span class="muted">Payment</span><span id="payment-preview">−${money(amount)}</span></div><div class="between total"><span>New balance</span><strong id="payment-result">${bal - amount < 0 ? "Credit " : ""}${money(bal - amount)}</strong></div></div><p class="small muted" style="margin-top:13px">Payments do not require photo or signature consent.</p><p id="form-error" class="error-text" role="alert"></p><button class="btn primary wide form-footer" type="submit">${icon("check")}Review payment</button></form></div>`;
+  return `<div class="narrow">${back("Record payment", cid ? "detail/" + cid : "home")}<button class="btn wide owner-payment-scan-trigger" data-action="owner-scan-payment-qr">${icon("camera")}Scan Payment QR</button><p class="small muted" style="margin:8px 0 20px">Scan a borrower payment request, review current ledger balances, then confirm receipt.</p><form id="payment-form">${customerSelect(draft.customerId)}<div class="field-group"><label for="payment-amount">Payment amount · ₱</label><input id="payment-amount" class="amount-input" type="number" min="0.01" step="0.01" max="9999999" value="${esc(draft.amount)}" placeholder="0.00" required></div><div class="filter-row payment-shortcuts" aria-label="Quick payment amounts">${quickAmounts.map(([value, label]) => `<button type="button" class="chip" data-action="payment-quick" data-value="${value}" ${!value ? "disabled" : ""}>${label}</button>`).join("")}</div><div class="field-group"><label for="note">Note <span class="muted">(optional)</span></label><textarea id="note" placeholder="e.g. Paid at the store" maxlength="300">${esc(draft.note)}</textarea></div><div class="totals"><div class="between"><span class="muted">Current balance</span><span>${bal < 0 ? "Credit " : ""}${money(bal)}</span></div><div class="between"><span class="muted">Payment</span><span id="payment-preview">−${money(amount)}</span></div><div class="between total"><span>New balance</span><strong id="payment-result">${bal - amount < 0 ? "Credit " : ""}${money(bal - amount)}</strong></div></div><p class="small muted" style="margin-top:13px">Payments do not require photo or signature consent.</p><p id="form-error" class="error-text" role="alert"></p><button class="btn primary wide form-footer" type="submit">${icon("check")}Review payment</button></form></div>`;
 }
 function consent() {
   if (!draft || !draft.total)
@@ -890,12 +931,69 @@ async function composite() {
 function success() {
   if (!lastSaved) return home();
   const c = customer(lastSaved.customer_id);
-  return `<div class="narrow center"><div class="success-icon">${icon("check")}</div><h1 class="success-title">${lastSaved.type === "utang" ? "Utang recorded!" : "Payment recorded!"}</h1><p class="muted">${lastSaved.type === "utang" ? "Photo and signature attached to this utang." : "One less thing to keep in mind. Salamat!"}</p><div class="card" style="margin:27px 0;text-align:left"><p class="money center" style="font-size:35px;margin-bottom:20px">${money(lastSaved.amount_cents)}</p><div class="between"><span class="muted">Customer</span><b>${esc(c?.name)}</b></div><div class="between" style="margin-top:15px"><span class="muted">Updated balance</span><strong>${balance(c?.id) < 0 ? "Credit " : ""}${money(balance(c?.id))}</strong></div>${lastSaved.type === "utang" ? note("One composite photo and signature is kept for this local session.") : ""}</div><a class="btn primary wide" href="#detail/${lastSaved.customer_id}">View updated ledger ${icon("arrow")}</a><p class="small muted" style="margin:17px">Temporary changes reset when the page reloads.</p></div>`;
+  return `<div class="narrow center"><div class="success-icon">${icon("check")}</div><h1 class="success-title">${lastSaved.type === "utang" ? "Utang recorded!" : "Payment recorded!"}</h1><p class="muted">${lastSaved.type === "utang" ? "Photo and signature attached to this utang." : "One less thing to keep in mind. Salamat!"}</p><div class="card" style="margin:27px 0;text-align:left"><p class="money center" style="font-size:35px;margin-bottom:20px">${money(lastSaved.amount_cents)}</p><div class="between"><span class="muted">Customer</span><b>${esc(c?.name)}</b></div><div class="between" style="margin-top:15px"><span class="muted">Updated balance</span><strong>${lastSaved.balance_after_cents < 0 ? "Credit " : ""}${money(lastSaved.balance_after_cents)}</strong></div>${lastSaved.type === "utang" ? note("One composite photo and signature is kept for this local session.") : ""}</div>${btn(icon("book") + "View QR receipt", "view-receipt", "primary wide", `data-id="${esc(lastSaved.id)}"`)}<a class="btn wide" style="margin-top:10px" href="#detail/${lastSaved.customer_id}">View updated ledger ${icon("arrow")}</a><p class="small muted" style="margin:17px">Temporary changes reset when the page reloads.</p></div>`;
 }
 const settingsRow = (i, title, sub, action) =>
   `<button class="settings-row" data-action="${action}"><span class="stat-icon">${icon(i)}</span><span class="grow"><b>${title}</b><span class="muted" style="display:block">${sub}</span></span>${icon("arrow")}</button>`;
 function more() {
   return `<div class="narrow"><div class="page-heading"><div><h1>More</h1><p class="muted">Settings and ledger tools.</p></div></div><div class="more-profile"><span class="avatar big">${icon("shield")}</span><div><h2>${esc(accountName)}</h2><p>LISTA · Temporary local data</p></div></div><div class="card more-links">${settingsRow("clock", "Reminders", "Review upcoming and overdue balances", "reminders")}${settingsRow("download", "Export Records", "Download Excel, CSV, or PDF reports", "export-records")}${settingsRow("tag", "Price Book", "Item and price suggestions", "prices")}</div><div class="card more-links">${settingsRow("settings", "Settings", "Account, security, data, and app preferences", "open-settings")}${settingsRow("book", "Quick guide", "Learn the essential LISTA workflow", "guide")}</div><div class="card more-links">${settingsRow("logout", "Log out", "Return to the LISTA welcome screen", "logout")}</div><p class="sync-status"><i class="dot"></i>Temporary local session</p></div>`;
+}
+
+function borrowerPortal() {
+  const mapped = model.getState().customers.map((person) => `<button class="settings-row" data-action="open-mapped-borrower" data-id="${esc(person.id)}"><span class="avatar">${esc(initials(person.name))}</span><span class="grow"><b>${esc(person.name)}</b><span class="muted" style="display:block">Local payment QR handoff · ${person.balance_cents > 0 ? money(person.balance_cents) + " balance" : "No open balance"}</span></span>${icon("arrow")}</button>`).join("");
+  return `<div class="narrow borrower-portal-owner">${back("Borrower Portal", "more")}<section class="portal-hero"><span class="eyebrow">Prototype only</span><h2>A customer view of LISTA</h2><p>Explore how borrowers could review their balance, utang, payments, due dates, and receipts on their own phone.</p><button class="btn primary" data-action="open-borrower-preview">${icon("eye")}Open Sample Borrower Preview</button></section>${note("The standalone preview uses separate sample data and cannot create owner-ledger payment requests. For a functional local QR handoff, choose an existing owner customer below.", "warning")}<div class="section-head"><h2>Local customer payment handoff</h2></div><section class="card more-links">${mapped || empty("No customers", "Add an owner-ledger customer before testing a payment QR handoff.")}</section><div class="portal-option-grid"><article class="card"><span class="stat-icon">${icon("people")}</span><h3>Customer Access</h3><p>Future borrowers would need secure identity verification and permission-scoped access before viewing real records.</p></article><article class="card"><span class="stat-icon">${icon("share")}</span><h3>Share / Invite</h3><p>Preview how an invitation could be explained without creating an unsecured access link.</p><button class="btn wide" data-action="borrower-invite-demo">View demo invitation</button></article><article class="card"><span class="stat-icon">${icon("home")}</span><h3>Install LISTA</h3><p>Add the web app to an Android or iPhone home screen for convenient access.</p><button class="btn wide" data-action="install">Installation instructions</button></article></div></div>`;
+}
+
+const isBorrowerAccount = () => sessionStorage.getItem("lista-role") === "borrower";
+const borrowerViewPerson = () => borrowerMappedCustomerId ? customer(borrowerMappedCustomerId) : isBorrowerAccount() ? { name: sessionStorage.getItem("lista-display-name") || "Borrower" } : borrowerDemo.borrower;
+const borrowerViewTransactions = () => borrowerMappedCustomerId ? model.getState().transactions.filter((tx) => tx.customer_id === borrowerMappedCustomerId && !tx.voided && !tx.voids_tx_id) : isBorrowerAccount() ? [] : borrowerDemo.transactions;
+const demoUtang = () => borrowerViewTransactions().filter((tx) => tx.type === "utang");
+const demoPayments = () => borrowerViewTransactions().filter((tx) => tx.type === "payment");
+const demoBalance = () => borrowerMappedCustomerId ? balance(borrowerMappedCustomerId) : isBorrowerAccount() ? 0 : borrowerDemo.transactions.at(-1)?.balance_after_cents || 0;
+const demoItems = (transaction) => transaction.line_items?.map((item) => item.label).join(", ") || "Cash utang";
+const demoStatus = (transaction) => transaction.due_at < today() ? '<span class="borrower-status overdue">Overdue</span>' : '<span class="borrower-status upcoming">Upcoming</span>';
+function borrowerHeading(title, subtitle) {
+  return `<div class="borrower-heading"><span class="eyebrow">${borrowerMappedCustomerId ? "Local mapped customer" : isBorrowerAccount() ? "Borrower account" : "Sample borrower"} · ${esc(borrowerViewPerson()?.name || "Unknown")}</span><h1>${title}</h1><p>${subtitle}</p></div>`;
+}
+function borrowerTxRow(transaction, withDue = false) {
+  return `<article class="borrower-tx"><span class="stat-icon ${transaction.type === "utang" ? "amber" : ""}">${icon(transaction.type === "utang" ? "bag" : "pay")}</span><div><strong>${esc(transaction.type === "utang" ? demoItems(transaction) : transaction.note || "Payment")}</strong><small>${date(transaction.created_at)}${withDue ? ` · Due ${date(transaction.due_at)}` : ""}</small></div><b class="${transaction.type === "payment" ? "positive" : ""}">${transaction.type === "payment" ? "−" : "+"}${money(transaction.amount_cents)}</b></article>`;
+}
+function borrowerHome() {
+  const due = demoUtang().filter((tx) => tx.due_at);
+  const person = borrowerViewPerson();
+  const store = borrowerMappedCustomerId ? { name: accountName, details: "This browser’s local owner ledger", contact: `Local store ID: ${storeId}` } : isBorrowerAccount() ? { name: "No linked store", details: "Store linking is planned for a later phase.", contact: "Your account data remains private." } : borrowerDemo.store;
+  const accountExit = sessionStorage.getItem("lista-role") === "borrower"
+    ? `<button data-action="borrower-account-qr">${icon("camera")}<span><b>My Account QR</b><small>Securely link your account to a store</small></span>${icon("arrow")}</button><button class="borrower-signout" data-action="borrower-exit">${icon("logout")}<span><b>Log Out</b><small>End this borrower session</small></span>${icon("arrow")}</button>`
+    : `<a class="borrower-menu-link" href="#borrower-portal">${icon("back")}<span><b>Return to Owner View</b><small>Keep the store-owner session active</small></span>${icon("arrow")}</a>`;
+  return `${borrowerHeading(`Hello, ${esc(person?.name?.split(" ")[0] || "there")}`, borrowerMappedCustomerId ? "This local handoff is mapped to the owner ledger on this browser." : isBorrowerAccount() ? "Your account is ready. No stores are linked yet." : "Here is your sample LISTA account.")}<section class="borrower-balance"><span>My Balance</span><strong>${money(demoBalance())}</strong><p>Total outstanding utang · ${borrowerMappedCustomerId ? "Local owner ledger" : isBorrowerAccount() ? "No linked stores" : "Demo data"}</p></section><div class="borrower-summary-grid"><a href="#borrower-utang" class="card"><span>My Utang</span><b>${demoUtang().length}</b><small>borrowed entries</small></a><a href="#borrower-payments" class="card"><span>Payments</span><b>${demoPayments().length}</b><small>recorded payments</small></a><a href="#borrower-receipts" class="card"><span>Receipts</span><b>${borrowerViewTransactions().length}</b><small>available receipts</small></a></div><div class="section-head"><h2>Due Dates</h2></div><section class="borrower-list">${due.map((tx) => `<article class="due-card"><div><strong>${esc(demoItems(tx))}</strong><small>Due ${date(tx.due_at)} · ${money(tx.amount_cents)}</small></div>${demoStatus(tx)}</article>`).join("") || empty("No due dates", "There are no upcoming or overdue balances.")}</section><div class="section-head"><h2>Store Information</h2></div><section class="card borrower-store"><span class="brand-mark">L</span><div><h3>${esc(store.name)}</h3><p>${esc(store.details)}</p><small>${esc(store.contact)}</small></div></section><div class="section-head"><h2>Account & App</h2></div><section class="card borrower-menu"><button data-action="install">${icon("home")}<span><b>Install LISTA</b><small>Android and iPhone instructions</small></span>${icon("arrow")}</button><button data-action="borrower-about">${icon("book")}<span><b>About LISTA</b><small>Learn about LISTA accounts</small></span>${icon("arrow")}</button>${accountExit}</section><p class="borrower-demo-note">${isBorrowerAccount() ? "No ledger data is linked or synchronized in Phase 2." : "Prototype preview only · Records do not sync across devices."}</p>`;
+}
+function borrowerUtang() {
+  return `${borrowerHeading("My Utang", "Borrowed items and amounts in this sample account.")}<section class="borrower-list">${demoUtang().map((tx) => borrowerTxRow(tx, true)).join("") || empty("No utang", "No borrowed items are available.")}</section>`;
+}
+function borrowerPayments() {
+  const mappedCustomer = borrowerMappedCustomerId ? customer(borrowerMappedCustomerId) : null;
+  if (isBorrowerAccount() && !mappedCustomer)
+    return `${borrowerHeading("Payments", "Payment records will appear after a future secure store link.")}${empty("No linked payments", "Account linking and persistent ledger migration are not part of Phase 2.")}`;
+  if (!mappedCustomer) {
+    const confirmed = demoPayments().slice().reverse().map((tx) => `<article class="borrower-payment-history"><div><span class="borrower-status confirmed">Confirmed · Sample</span><strong>${esc(tx.note || "Payment")}</strong><small>${date(tx.created_at)} · Sample borrower record</small></div><b>−${money(tx.amount_cents)}</b></article>`).join("");
+    return `${borrowerHeading("Payments", "Sample payment history for the demonstration borrower.")}${note("Payment QR generation is unavailable in the standalone demo because Maria Santos is not securely mapped to an owner-ledger customer. Open a local customer handoff from the owner’s Borrower Portal to test functional recording.", "warning")}<div class="section-head"><h2>Sample Payment History</h2></div><section class="borrower-list">${confirmed}</section>`;
+  }
+  const state = model.getState();
+  const openUtang = state.transactions.filter((tx) => tx.customer_id === mappedCustomer.id && tx.type === "utang" && outstandingForUtang(state.transactions, tx.id) > 0);
+  const utangOptions = openUtang.map((tx) => `<option value="${esc(tx.id)}">${esc(demoItems(tx))} · ${money(outstandingForUtang(state.transactions, tx.id))} outstanding</option>`).join("");
+  if (!openUtang.length) return `${borrowerHeading("Payments", `${esc(mappedCustomer.name)} · Local owner-ledger handoff`)}${empty("No outstanding utang", "This mapped customer has no payable utang entries.")}`;
+  const confirmed = state.transactions.filter((tx) => tx.customer_id === mappedCustomer.id && tx.type === "payment" && !tx.voided && !tx.voids_tx_id).slice().reverse().map((tx) => `<article class="borrower-payment-history"><div><span class="borrower-status confirmed">Confirmed locally</span><strong>${esc(tx.note || "Payment")}</strong><small>${date(tx.created_at)} · Owner ledger</small></div><b>−${money(tx.amount_cents)}</b></article>`).join("");
+  return `${borrowerHeading("Payments", `${esc(mappedCustomer.name)} · Local owner-ledger payment handoff`)}<div class="mapped-handoff-badge">${icon("shield")}Mapped to this browser’s owner ledger · Store ${esc(storeId)}</div><div class="payment-method-grid"><form id="borrower-cash-form" class="card borrower-payment-form"><span class="stat-icon">${icon("pay")}</span><h2>Cash Payment</h2><p>Generate a QR, then present it to the store owner after handing over your cash.</p><label for="cash-utang">Outstanding utang</label><select id="cash-utang" required>${utangOptions}</select><label for="cash-payment-amount">Payment amount · ₱</label><input id="cash-payment-amount" type="number" min="0.01" step="0.01" required placeholder="0.00"><button class="btn primary wide" type="submit">Review & Generate QR</button></form><form id="borrower-online-form" class="card borrower-payment-form"><span class="stat-icon">${icon("wifi")}</span><h2>Online Payment</h2><p>LISTA does not transfer money. The store owner must independently verify the transfer.</p><label for="online-utang">Outstanding utang</label><select id="online-utang" required>${utangOptions}</select><label for="online-method">Payment method</label><select id="online-method" required><option>GCash</option><option>Maya</option><option>Bank Transfer</option></select><label for="online-payment-amount">Payment amount · ₱</label><input id="online-payment-amount" type="number" min="0.01" step="0.01" required placeholder="0.00"><label for="online-reference">Transaction/reference number <span class="muted">(optional)</span></label><input id="online-reference" maxlength="80"><button class="btn primary wide" type="submit">Review & Generate QR</button></form></div>${note("A payment request QR does not complete or verify a payment. The owner must scan, review, and confirm receipt.", "warning")}<div class="section-head"><h2>Existing Payment History</h2></div><section class="borrower-list">${confirmed || empty("No payments", "No payment records are available.")}</section>`;
+}
+function borrowerReceipts() {
+  const scanned = borrowerScannedReceipts.map((receipt) => `<article class="borrower-receipt-row scanned"><div><span class="borrower-status pending">Scanned · Unverified</span><strong>${money(receipt.amountCents)}</strong><small>${date(receipt.createdAt)} · ${esc(receipt.reference)} · ${esc(receipt.store)}</small></div></article>`).join("");
+  return `${borrowerHeading("Receipts", "View available receipts and confirmed QR imports.")}<section class="borrower-list">${scanned}${borrowerViewTransactions().slice().reverse().map((tx) => `<article class="borrower-receipt-row"><div><span class="borrower-status ${tx.type === "payment" ? "paid" : "upcoming"}">${tx.type === "payment" ? "Payment" : "Utang"}</span><strong>${money(tx.amount_cents)}</strong><small>${date(tx.created_at)} · ${esc(tx.id)}</small></div><button class="btn" data-action="view-receipt" data-source="${borrowerMappedCustomerId ? "owner" : "borrower-demo"}" data-id="${esc(tx.id)}">View receipt</button></article>`).join("") || empty("No receipts", "Receipts will appear here when transactions are available.")}</section>${note("Payment request QR codes and completed payment receipt QR codes are distinct. Scanned data is never proof of debt.")}`;
+}
+
+function borrowerScanner() {
+  const receipt = borrowerScan.receipt;
+  const result = receipt ? `<section class="card scan-result"><span class="borrower-status pending">Unverified QR data</span><h2>Review scanned receipt</h2><dl><div><dt>Store</dt><dd>${esc(receipt.store)}</dd></div><div><dt>Customer</dt><dd>${esc(receipt.customer || "Not provided")}</dd></div><div><dt>Type</dt><dd>${esc(receipt.type)}</dd></div><div><dt>Amount</dt><dd>${money(receipt.amountCents)}</dd></div><div><dt>Reference</dt><dd>${esc(receipt.reference)}</dd></div><div><dt>Date</dt><dd>${esc(receiptDateTime(receipt.createdAt))}</dd></div></dl>${note("Confirming only adds this unverified receipt to the borrower demo. It does not create or verify a debt.", "warning")}<div class="actions"><button class="btn" data-action="borrower-clear-scan">Discard</button><button class="btn primary" data-action="borrower-confirm-import">Add to demo receipts</button></div></section>` : "";
+  return `${borrowerHeading("Scan QR", "Read a LISTA receipt using your camera or an image.")}<section class="scanner-card card"><div class="scanner-frame"><video id="borrower-scanner-video" aria-label="QR scanner camera preview"></video><span class="scanner-guide"></span><canvas id="borrower-scanner-canvas" hidden></canvas></div><div class="scanner-actions"><button class="btn primary" data-action="borrower-start-scan">${icon("camera")}Use camera</button><label class="btn" for="borrower-qr-file">${icon("download")}Choose image<input id="borrower-qr-file" type="file" accept="image/*" hidden></label></div><p class="small muted">Camera access is used only while this scanner is open.</p>${borrowerScan.phase === "scanning" ? '<div class="scan-status"><i class="dot"></i>Looking for a QR code…</div>' : ""}${borrowerScan.error ? `<div class="view-note error">${icon("alert")}<span>${esc(borrowerScan.error)}</span></div>` : ""}</section>${result}${note("LISTA QR receipts are versioned JSON summaries. Scanning does not prove authenticity, ownership, or payment.")}`;
 }
 function settings() {
   const group = (title, rows) => `<section class="settings-group"><div class="section-head"><h2>${title}</h2></div><div class="card">${rows}</div></section>`;
@@ -917,6 +1015,7 @@ function pinScreen() {
 }
 function modal(html) {
   const d = $("#dialog");
+  d.classList.remove("add-person-dialog");
   d.innerHTML =
     btn(
       icon("close"),
@@ -929,13 +1028,336 @@ function modal(html) {
 }
 function closeModal() {
   const dialog = $("#dialog");
-  dialog.close();
+  if (dialog.querySelector("#borrower-account-qr")) { clearTimeout(accountQrTimer); accountQrTimer = 0; }
+  if (borrowerScannerStream && dialog.querySelector("#owner-payment-video, #owner-account-video")) stopBorrowerScanner();
+  if (dialog.open) dialog.close();
   dialog.classList.remove("smart-import-dialog");
   dialog.classList.remove("export-report-dialog");
+  dialog.classList.remove("receipt-dialog");
+  dialog.classList.remove("add-person-dialog");
   if (evidenceUrl) {
     URL.revokeObjectURL(evidenceUrl);
     evidenceUrl = null;
   }
+}
+
+const receiptDateTime = (value) => new Intl.DateTimeFormat("en-PH", {
+  dateStyle: "medium",
+  timeStyle: "short",
+}).format(new Date(value));
+
+const receiptMoney = (cents, signed = false) => {
+  const formatted = money(cents);
+  return signed && cents < 0 ? `Credit ${formatted}` : formatted;
+};
+
+async function showReceipt(transactionId, source = "owner") {
+  receiptTransactionId = transactionId;
+  receiptImageCanvas = null;
+  const isBorrowerDemo = source === "borrower-demo";
+  const transaction = (isBorrowerDemo ? borrowerDemo.transactions : model.getState().transactions).find((row) => row.id === transactionId);
+  try {
+    const person = isBorrowerDemo ? borrowerDemo.borrower : transaction ? customer(transaction.customer_id) : null;
+    const receipt = buildReceiptData(transaction, person, isBorrowerDemo ? borrowerDemo.store.name : accountName);
+    modal(`<article class="receipt-shell" id="receipt-print-area"><header class="receipt-header"><span class="receipt-brand">LISTA</span><span class="eyebrow">Transaction receipt</span><h2>${esc(receipt.store)}</h2><p>Saved ledger details</p></header><div class="receipt-amount"><span>${receipt.type === "utang" ? "Utang" : "Payment"}</span><strong>${money(receipt.amountCents)}</strong></div><div class="receipt-qr-wrap"><canvas id="receipt-qr" aria-label="QR code containing this receipt's transaction details"></canvas><p>Scan to read the receipt details</p></div><dl class="receipt-details"><div><dt>Customer</dt><dd>${esc(receipt.customer)}</dd></div><div><dt>Remaining balance</dt><dd>${receiptMoney(receipt.balanceCents, true)}</dd></div><div><dt>Reference</dt><dd>${esc(receipt.reference)}</dd></div><div><dt>Date and time</dt><dd>${esc(receiptDateTime(receipt.createdAt))}</dd></div></dl><p class="receipt-disclaimer">This QR contains a copy of these receipt details. It is not a public verification link and does not claim server or cryptographic verification.</p></article><p id="dialog-error" class="error-text" role="alert"></p><div class="receipt-actions"><button class="btn primary" data-action="download-receipt">${icon("download")}Download image</button><button class="btn" data-action="print-receipt">${icon("print")}Print</button><button class="btn ghost" data-action="close-dialog">Close</button></div>`);
+    $("#dialog").classList.add("receipt-dialog");
+    const qrCanvas = $("#receipt-qr");
+    await drawReceiptQr(qrCanvas, receipt);
+    const imageCanvas = document.createElement("canvas");
+    drawReceiptImage(imageCanvas, qrCanvas, receipt, receiptMoney, receiptDateTime);
+    receiptImageCanvas = imageCanvas;
+    $("#receipt-print-area").dataset.payload = receiptPayload(receipt);
+  } catch (error) {
+    modal(`<div class="receipt-error"><span class="confirm-icon">${icon("alert")}</span><h2>Receipt unavailable</h2><p>${esc(error.message || "This receipt could not be generated.")}</p>${note("The transaction was not changed. Close this message and try opening it again from history.", "error")}<button class="btn wide" data-action="close-dialog">Close</button></div>`);
+  }
+}
+
+function downloadReceipt() {
+  if (!receiptImageCanvas || !receiptTransactionId)
+    throw new Error("The receipt image is not ready yet.");
+  receiptImageCanvas.toBlob((blob) => {
+    if (!blob) return toast("The receipt image could not be created.", "error");
+    downloadBlob(blob, `LISTA-receipt-${receiptTransactionId}.png`);
+  }, "image/png");
+}
+
+function stopBorrowerScanner() {
+  cancelAnimationFrame(borrowerScanFrame);
+  borrowerScanFrame = 0;
+  if (borrowerScannerStream) stopCamera(borrowerScannerStream, $("#borrower-scanner-video"));
+  borrowerScannerStream = null;
+}
+
+function acceptBorrowerQr(raw) {
+  try {
+    borrowerScan.receipt = parseListaReceiptPayload(raw);
+    borrowerScan.error = "";
+    borrowerScan.phase = "review";
+    stopBorrowerScanner();
+    render();
+  } catch (error) {
+    borrowerScan.receipt = null;
+    borrowerScan.error = error.message || "This QR code could not be read.";
+    borrowerScan.phase = "error";
+    stopBorrowerScanner();
+    render();
+  }
+}
+
+function scanBorrowerVideoFrame() {
+  if (!borrowerScannerStream || route !== "borrower-scan") return;
+  const video = $("#borrower-scanner-video"), canvas = $("#borrower-scanner-canvas");
+  if (video?.videoWidth && canvas) {
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const image = context.getImageData(0, 0, canvas.width, canvas.height);
+    const result = jsQR(image.data, image.width, image.height, { inversionAttempts: "attemptBoth" });
+    if (result?.data) return acceptBorrowerQr(result.data);
+  }
+  borrowerScanFrame = requestAnimationFrame(scanBorrowerVideoFrame);
+}
+
+async function decodeBorrowerQrFile(file) {
+  if (!file?.type?.startsWith("image/")) throw new Error("Choose a QR code image to continue.");
+  const url = URL.createObjectURL(file);
+  try {
+    const image = new Image();
+    image.src = url;
+    await image.decode();
+    const canvas = document.createElement("canvas"), width = image.naturalWidth, height = image.naturalHeight;
+    if (!width || !height) throw new Error("The selected image could not be read.");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    context.drawImage(image, 0, 0);
+    const pixels = context.getImageData(0, 0, width, height);
+    const result = jsQR(pixels.data, width, height, { inversionAttempts: "attemptBoth" });
+    if (!result?.data) throw new Error("No readable QR code was found in that image.");
+    acceptBorrowerQr(result.data);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function bindBorrowerScanner() {
+  const input = $("#borrower-qr-file");
+  if (input) input.onchange = async () => {
+    borrowerScan.error = "";
+    try { await decodeBorrowerQrFile(input.files?.[0]); }
+    catch (error) { borrowerScan.error = error.message || "The image could not be scanned."; borrowerScan.phase = "error"; render(); }
+  };
+}
+
+function renderOwnerPaymentScanner(error = "") {
+  modal(`<div class="owner-payment-scanner"><span class="eyebrow">Store owner payment recording</span><h2>Scan Payment QR</h2><p>Payment requests are untrusted until matched to this ledger and explicitly confirmed.</p><div class="scanner-frame owner"><video id="owner-payment-video" playsinline muted></video><span class="scanner-guide"></span><canvas id="owner-payment-canvas" hidden></canvas></div><div class="scanner-actions"><button class="btn primary" data-action="owner-start-payment-camera">${icon("camera")}Use camera</button><label class="btn" for="owner-payment-file">${icon("download")}Choose QR image<input id="owner-payment-file" type="file" accept="image/*" hidden></label></div>${demoMode ? '<button class="btn wide" data-action="use-demo-payment-qr">Use latest Demo Payment QR</button>' : ""}${error ? `<div class="view-note error">${icon("alert")}<span>${esc(error)}</span></div>` : ""}</div>`);
+  const input = $("#owner-payment-file");
+  if (input) input.onchange = async () => {
+    try {
+      const file = input.files?.[0];
+      if (!file?.type?.startsWith("image/")) throw new Error("Choose a QR code image.");
+      const url = URL.createObjectURL(file);
+      try {
+        const image = new Image(); image.src = url; await image.decode();
+        const canvas = document.createElement("canvas"); canvas.width = image.naturalWidth; canvas.height = image.naturalHeight;
+        const context = canvas.getContext("2d", { willReadFrequently: true }); context.drawImage(image, 0, 0);
+        const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
+        const result = jsQR(pixels.data, canvas.width, canvas.height, { inversionAttempts: "attemptBoth" });
+        if (!result?.data) throw new Error("No readable QR code was found in that image.");
+        reviewOwnerPaymentQr(result.data);
+      } finally { URL.revokeObjectURL(url); }
+    } catch (scanError) { renderOwnerPaymentScanner(scanError.message || "The QR image could not be scanned."); }
+  };
+}
+
+function reviewOwnerPaymentQr(raw) {
+  try {
+    const request = parsePaymentQrPayload(raw);
+    const match = validatePaymentRequest(request, { storeId, customers: model.getState().customers, transactions: model.getState().transactions, processedRequestIds: processedPaymentRequestIds });
+    stopBorrowerScanner();
+    ownerPaymentScan = { request, match };
+    const online = request.method !== "Cash";
+    modal(`<div class="confirm-dialog owner-payment-review"><span class="confirm-icon">${icon(online ? "wifi" : "pay")}</span><span class="eyebrow">Validated against current local ledger</span><h2>Confirm payment receipt?</h2><div class="confirmation-summary"><div><span>Customer</span><b>${esc(match.customer.name)}</b></div><div><span>Target utang</span><b>${esc(request.utangId)}</b></div><div><span>Current outstanding</span><b>${money(match.outstandingCents)}</b></div><div><span>Payment</span><b>${money(request.amountCents)}</b></div><div><span>Method</span><b>${esc(request.method)}</b></div>${request.externalReference ? `<div><span>External reference</span><b>${esc(request.externalReference)}</b></div>` : ""}</div>${note(online ? "Confirm only after independently verifying the transfer. A reference number is not proof of payment." : "Confirm only after receiving the cash from the borrower.", "warning")}<p id="dialog-error" class="error-text" role="alert"></p><div class="actions"><button class="btn" data-action="close-dialog">Cancel</button><button class="btn primary" data-action="owner-confirm-payment-qr">${online ? "Transfer verified" : "Cash received"} · Record payment</button></div></div>`);
+  } catch (error) {
+    stopBorrowerScanner();
+    renderOwnerPaymentScanner(error.message || "This payment QR is invalid.");
+  }
+}
+
+function scanOwnerPaymentFrame() {
+  if (!borrowerScannerStream || !$("#dialog")?.open) return;
+  const video = $("#owner-payment-video"), canvas = $("#owner-payment-canvas");
+  if (video?.videoWidth && canvas) {
+    canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
+    const result = jsQR(pixels.data, pixels.width, pixels.height, { inversionAttempts: "attemptBoth" });
+    if (result?.data) return reviewOwnerPaymentQr(result.data);
+  }
+  borrowerScanFrame = requestAnimationFrame(scanOwnerPaymentFrame);
+}
+
+function reviewBorrowerPayment(data) {
+  try {
+    const person = borrowerMappedCustomerId ? customer(borrowerMappedCustomerId) : null;
+    if (!person) throw new Error("No owner-ledger customer is mapped to this borrower view.");
+    const amountCents = data.amountCents;
+    if (!Number.isSafeInteger(amountCents) || amountCents <= 0) throw new Error("Enter a valid payment amount.");
+    const outstandingCents = outstandingForUtang(model.getState().transactions, data.utangReference);
+    if (outstandingCents <= 0) throw new Error("The selected utang is already fully paid or unavailable.");
+    if (amountCents > outstandingCents) throw new Error(`Payment cannot exceed the current outstanding amount of ${money(outstandingCents)}.`);
+    borrowerPaymentDraft = { method: data.method, amountCents, utangId: data.utangReference, externalReference: String(data.paymentReference || "").trim(), customerId: person.id, outstandingCents };
+    const online = data.method !== "Cash";
+    modal(`<div class="confirm-dialog"><span class="confirm-icon">${icon(online ? "wifi" : "pay")}</span><span class="eyebrow">Payment request review</span><h2>Generate this payment QR?</h2><div class="confirmation-summary"><div><span>Customer</span><b>${esc(person.name)}</b></div><div><span>Method</span><b>${esc(data.method)}</b></div><div><span>Target utang</span><b>${esc(data.utangReference)}</b></div><div><span>Current outstanding</span><b>${money(outstandingCents)}</b></div><div><span>Payment amount</span><b>${money(amountCents)}</b></div>${borrowerPaymentDraft.externalReference ? `<div><span>External reference</span><b>${esc(borrowerPaymentDraft.externalReference)}</b></div>` : ""}</div>${note(online ? "LISTA does not process the transfer. The owner must independently verify it before recording payment." : "Present the generated QR after handing cash to the store owner. The owner must confirm receipt.", "warning")}<div class="actions"><button class="btn" data-action="close-dialog">Cancel</button><button class="btn primary" data-action="confirm-borrower-payment">Generate payment QR</button></div></div>`);
+  } catch (error) {
+    toast(error.message || "The payment request is invalid.", "error");
+  }
+}
+
+async function showBorrowerPaymentQr() {
+  const draft = borrowerPaymentDraft;
+  if (!draft) throw new Error("Payment request details are unavailable.");
+  const currentOutstanding = outstandingForUtang(model.getState().transactions, draft.utangId);
+  if (currentOutstanding <= 0 || draft.amountCents > currentOutstanding)
+    throw new Error("The target utang changed. Review the current outstanding amount again.");
+  const payload = createPaymentQrPayload({ storeId, customerId: draft.customerId, utangId: draft.utangId, amountCents: draft.amountCents, method: draft.method, externalReference: draft.externalReference });
+  borrowerPaymentQr = { payload, request: parsePaymentQrPayload(payload) };
+  if (demoMode) localStorage.setItem("lista-demo-payment-qr", payload);
+  modal(`<div class="payment-qr-dialog"><span class="eyebrow">Awaiting owner confirmation</span><h2>Present this payment QR</h2><canvas id="borrower-payment-qr" aria-label="LISTA payment request QR"></canvas><div class="confirmation-summary"><div><span>Method</span><b>${esc(draft.method)}</b></div><div><span>Amount</span><b>${money(draft.amountCents)}</b></div><div><span>Request</span><b>${esc(borrowerPaymentQr.request.requestId)}</b></div></div><p>${draft.method === "Cash" ? "Present this QR to the store owner after handing over your cash." : "The store owner must verify the transfer before confirming payment."}</p>${note("This is a payment request, not a completed-payment receipt. It contains identifiers and amounts only.", "warning")}<div class="actions"><button class="btn primary" data-action="download-payment-qr">${icon("download")}Download QR</button><button class="btn" data-action="close-dialog">Done</button></div></div>`);
+  await drawQrPayload($("#borrower-payment-qr"), payload, 300);
+}
+
+function bindBorrowerPaymentForms() {
+  const cash = $("#borrower-cash-form"), online = $("#borrower-online-form");
+  if (cash) cash.onsubmit = (event) => {
+    event.preventDefault();
+    reviewBorrowerPayment({ method: "Cash", utangReference: $("#cash-utang").value, amountCents: parseCents($("#cash-payment-amount").value) });
+  };
+  if (online) online.onsubmit = (event) => {
+    event.preventDefault();
+    reviewBorrowerPayment({ method: $("#online-method").value, utangReference: $("#online-utang").value, amountCents: parseCents($("#online-payment-amount").value), paymentReference: $("#online-reference").value });
+  };
+}
+
+async function showBorrowerAccountQr() {
+  borrowerAccountQr = null;
+  modal(`<div class="account-link-dialog"><div class="spinner"></div><h2>Creating Account QR…</h2><p>The secure token will be valid for 10 minutes.</p></div>`);
+  try {
+    if (demoMode) {
+      const bytes = crypto.getRandomValues(new Uint8Array(32));
+      const token = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+      borrowerAccountQr = { token, expiresAt: new Date(Date.now() + 600000).toISOString(), payload: createAccountLinkPayload(token) };
+      localStorage.setItem("lista-demo-account-token", JSON.stringify({ token, expiresAt: borrowerAccountQr.expiresAt, used: false }));
+    } else borrowerAccountQr = await accountLinkService.issue();
+    const expires = new Date(borrowerAccountQr.expiresAt).toLocaleTimeString("en-PH", { hour: "numeric", minute: "2-digit" });
+    modal(`<div class="account-link-dialog"><span class="eyebrow">Borrower account linking</span><h2>My Account QR</h2><p>Ask the store owner to scan this QR before ${esc(expires)}.</p><canvas id="borrower-account-qr" aria-label="Short-lived LISTA Account QR"></canvas><label for="borrower-account-token">Manual token</label><input id="borrower-account-token" readonly value="${esc(borrowerAccountQr.token)}"><button class="btn wide" data-action="copy-account-token">Copy manual token</button><div class="view-note">${icon("shield")}<span>Single use · Expires in 10 minutes · Contains no name or permanent account ID</span></div><div class="actions"><button class="btn primary" data-action="refresh-account-qr">Refresh QR</button><button class="btn" data-action="close-dialog">Done</button></div></div>`);
+    await drawQrPayload($("#borrower-account-qr"), borrowerAccountQr.payload, 300);
+    clearTimeout(accountQrTimer);
+    accountQrTimer = setTimeout(() => {
+      if (!$("#borrower-account-qr")) return;
+      borrowerAccountQr = null;
+      modal(`<div class="account-link-dialog"><span class="eyebrow">Account QR expired</span><h2>Generate a fresh QR</h2><p>This token has reached its 10-minute limit and cannot be linked.</p><button class="btn primary wide" data-action="refresh-account-qr">Refresh Account QR</button></div>`);
+    }, Math.max(0, new Date(borrowerAccountQr.expiresAt).getTime() - Date.now()));
+  } catch (error) { modal(`<div class="account-link-dialog"><h2>Account QR unavailable</h2>${note(esc(error.message || "The QR could not be created."), "error")}<button class="btn primary wide" data-action="refresh-account-qr">Try again</button></div>`); }
+}
+
+function renderOwnerAccountScanner(error = "") {
+  accountLinkScan = null;
+  modal(`<div class="owner-account-scanner"><span class="eyebrow">Secure borrower linking</span><h2>Scan Account QR</h2><p>Scan the borrower’s short-lived Account QR. No customer is linked until you review and confirm.</p><div class="scanner-frame owner"><video id="owner-account-video" playsinline muted></video><span class="scanner-guide"></span><canvas id="owner-account-canvas" hidden></canvas></div><div class="scanner-actions"><button class="btn primary" data-action="owner-start-account-camera">${icon("camera")}Use camera</button><label class="btn" for="owner-account-file">${icon("download")}Choose QR image<input id="owner-account-file" type="file" accept="image/*" hidden></label></div>${demoMode ? '<button class="btn wide" data-action="use-demo-account-qr">Use latest Demo Account QR</button>' : ""}<form id="account-token-form"><label for="account-token">Manual token</label><div class="actions"><input id="account-token" autocomplete="off" maxlength="64" placeholder="Paste the 64-character token"><button class="btn" type="submit">Continue</button></div></form>${error ? `<div class="view-note error">${icon("alert")}<span>${esc(error)}</span></div>` : ""}</div>`);
+  const form = $("#account-token-form");
+  form.onsubmit = (event) => { event.preventDefault(); reviewAccountLinkToken($("#account-token").value); };
+  const input = $("#owner-account-file");
+  input.onchange = async () => {
+    try {
+      const file = input.files?.[0];
+      if (!file?.type?.startsWith("image/")) throw new Error("Choose a QR code image.");
+      const url = URL.createObjectURL(file);
+      try {
+        const image = new Image(); image.src = url; await image.decode();
+        const canvas = document.createElement("canvas"); canvas.width = image.naturalWidth; canvas.height = image.naturalHeight;
+        const context = canvas.getContext("2d", { willReadFrequently: true }); context.drawImage(image, 0, 0);
+        const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
+        const result = jsQR(pixels.data, pixels.width, pixels.height, { inversionAttempts: "attemptBoth" });
+        if (!result?.data) throw new Error("No readable QR code was found in that image.");
+        await reviewAccountLinkPayload(result.data);
+      } finally { URL.revokeObjectURL(url); }
+    } catch (scanError) { renderOwnerAccountScanner(scanError.message || "The QR image could not be scanned."); }
+  };
+}
+
+async function reviewAccountLinkPayload(raw) {
+  const { token } = parseAccountLinkPayload(raw);
+  await reviewAccountLinkToken(token);
+}
+
+async function reviewAccountLinkToken(token) {
+  stopBorrowerScanner();
+  const cleanToken = String(token || "").trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(cleanToken)) return renderOwnerAccountScanner("Enter a valid LISTA account-link token.");
+  try {
+    let preview;
+    if (demoMode) {
+      const saved = JSON.parse(localStorage.getItem("lista-demo-account-token") || "null");
+      if (!saved || saved.token !== cleanToken || saved.used || new Date(saved.expiresAt).getTime() <= Date.now()) throw new Error("This Account QR is expired, invalid, or has already been used.");
+      preview = { borrower_display_name: DEMO_BORROWER.name, expires_at: saved.expiresAt };
+    } else preview = await accountLinkService.preview(cleanToken);
+    accountLinkScan = { token: cleanToken, preview };
+    const options = model.getState().customers.map((person) => `<option value="${esc(person.id)}">${esc(person.name)}</option>`).join("");
+    modal(`<div class="account-link-review"><span class="eyebrow">Borrower found</span><h2>${esc(preview.borrower_display_name)}</h2><p>Choose exactly how this borrower should appear in your store. LISTA never matches customers by name.</p><form id="account-link-form"><label><input type="radio" name="link-mode" value="new" checked> Create a new customer</label><div class="field-group"><label for="link-new-name">Customer name</label><input id="link-new-name" required maxlength="90" value="${esc(preview.borrower_display_name)}"></div><label><input type="radio" name="link-mode" value="existing" ${options ? "" : "disabled"}> Link an existing customer</label><div class="field-group"><label for="link-existing">Existing customer</label><select id="link-existing" ${options ? "" : "disabled"}>${options || '<option>No existing customers</option>'}</select></div>${note("Linking an existing customer preserves all of that local customer’s transaction history.", "warning")}<p id="dialog-error" class="error-text" role="alert"></p><div class="actions"><button class="btn" type="button" data-action="close-dialog">Cancel</button><button class="btn primary" type="submit">Confirm link</button></div></form></div>`);
+    $("#account-link-form").onsubmit = confirmAccountLink;
+    if (demoMode && options) {
+      $('#account-link-form input[value="new"]').checked = false;
+      $('#account-link-form input[value="existing"]').checked = true;
+      $("#link-existing").value = DEMO_BORROWER.id;
+    }
+  } catch (error) { renderOwnerAccountScanner(error.message || "The Account QR could not be validated."); }
+}
+
+async function confirmAccountLink(event) {
+  event.preventDefault();
+  if (!accountLinkScan || busy) return;
+  const form = event.currentTarget, mode = new FormData(form).get("link-mode");
+  const existingId = mode === "existing" ? $("#link-existing").value : null;
+  const existing = existingId ? customer(existingId) : null;
+  const name = mode === "existing" ? existing?.name : $("#link-new-name").value.trim();
+  if (!name) return dialogError(Error("Enter or choose a customer name."));
+  let createdLocal = null;
+  busy = true;
+  form.querySelector('button[type="submit"]').disabled = true;
+  try {
+    if (mode === "new") createdLocal = await model.addCustomer(name);
+    const localCustomer = createdLocal || existing;
+    if (demoMode) {
+      const saved = JSON.parse(localStorage.getItem("lista-demo-account-token") || "null");
+      if (!saved || saved.token !== accountLinkScan.token || saved.used || new Date(saved.expiresAt).getTime() <= Date.now()) throw new Error("This Account QR is expired, invalid, or has already been used.");
+      localStorage.setItem("lista-demo-account-token", JSON.stringify({ ...saved, used: true }));
+      localStorage.setItem("lista-demo-account-linked", "true");
+    } else await accountLinkService.redeem({ token: accountLinkScan.token, mode, customerName: name, localCustomerRef: localCustomer.id });
+    closeModal();
+    cid = localCustomer.id;
+    go("detail", localCustomer.id);
+    toast(`${accountLinkScan.preview.borrower_display_name} linked successfully.`);
+    accountLinkScan = null;
+  } catch (error) {
+    if (createdLocal) await model.deleteCustomer(createdLocal.id);
+    dialogError(error);
+    form.querySelector('button[type="submit"]').disabled = false;
+  } finally { busy = false; }
+}
+
+function scanOwnerAccountFrame() {
+  if (!borrowerScannerStream || !$("#owner-account-video")) return;
+  const video = $("#owner-account-video"), canvas = $("#owner-account-canvas");
+  if (video?.videoWidth && canvas) {
+    canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+    const context = canvas.getContext("2d", { willReadFrequently: true }); context.drawImage(video, 0, 0);
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
+    const result = jsQR(pixels.data, pixels.width, pixels.height, { inversionAttempts: "attemptBoth" });
+    if (result?.data) return reviewAccountLinkPayload(result.data).catch((error) => renderOwnerAccountScanner(error.message));
+  }
+  borrowerScanFrame = requestAnimationFrame(scanOwnerAccountFrame);
 }
 
 function clearSmartImportPreview() {
@@ -1048,8 +1470,11 @@ function confirmDialog({ title, text, label, work, kind = "warning", details = "
     }
   };
 }
-function addCustomer() {
-  const origin = route === "people" ? "people" : "home";
+function chooseAddCustomer() {
+  modal(`<div class="add-person-choice"><h2>Add Person</h2><h3>How would you like to add them?</h3><p>Choose how to add a customer to your ledger.</p><div class="add-person-options"><button class="add-person-option" data-action="add-customer-manual"><span class="add-person-option-icon">${icon("edit")}</span><span class="add-person-option-copy"><b>Add Manually</b><small>Add a customer without a LISTA account.</small></span><span class="add-person-option-arrow">${icon("arrow")}</span></button><button class="add-person-option" data-action="owner-scan-account-qr"><span class="add-person-option-icon">${icon("camera")}</span><span class="add-person-option-copy"><b>Scan Borrower QR</b><small>Link a borrower using their LISTA Account QR.</small></span><span class="add-person-option-arrow">${icon("arrow")}</span></button></div></div>`);
+  $("#dialog").classList.add("add-person-dialog");
+}
+function addCustomerManual() {
   modal(
     `<h2>Add a customer</h2><p>A name is all you need to start their ledger.</p><form id="customer-form"><label for="customer-name">Full name</label><input id="customer-name" required maxlength="90" placeholder="e.g. Rosa Dela Cruz" autocomplete="off"><p id="dialog-error" class="error-text" role="alert"></p><button class="btn primary wide" type="submit" style="margin-top:22px">Save customer</button></form>`,
   );
@@ -1057,10 +1482,10 @@ function addCustomer() {
     event.preventDefault();
     try {
       const customer = await model.addCustomer($("#customer-name").value);
-      returnRoute = origin;
+      returnRoute = "people";
       closeModal();
-      go("detail", customer.id);
-      toast("Customer added.");
+      go("people");
+      toast(`${customer.name} added successfully.`);
     } catch (error) {
       dialogError(error);
     }
@@ -1071,7 +1496,7 @@ function showTransaction(id) {
   if (!tx) return;
   const history = (tx.edit_history || []).slice().reverse().map((entry, index) => `<details class="edit-history-entry"><summary><span>Revision ${(tx.edit_history || []).length - index}</span><time>${date(entry.edited_at)}</time></summary><p><b>Reason:</b> ${esc(entry.reason)}</p><div class="history-change"><span>Amount</span><b>${money(entry.previous.amount_cents)} → ${money(entry.updated.amount_cents)}</b></div><div class="history-change"><span>Due date</span><b>${date(entry.previous.due_at)} → ${date(entry.updated.due_at)}</b></div><div class="history-change"><span>Note</span><b>${esc(entry.previous.note || "None")} → ${esc(entry.updated.note || "None")}</b></div><div class="history-change"><span>Items</span><b>${entry.previous.line_items?.length || 0} → ${entry.updated.line_items?.length || 0}</b></div></details>`).join("");
   modal(
-    `<h2>Transaction details</h2><p>${esc(customer(tx.customer_id)?.name)} · ${date(tx.created_at)}</p><div class="totals"><div class="between"><span class="badge">${txLabel(tx)}</span><strong style="font-size:25px">${money(tx.amount_cents)}</strong></div><div class="between small"><span>Balance after</span><b>${tx.balance_after_cents < 0 ? "Credit " : ""}${money(tx.balance_after_cents)}</b></div></div>${tx.line_items?.length ? `<h3 style="margin:20px 0 10px">Items</h3>${tx.line_items.map((item) => `<div class="between small" style="margin-bottom:10px"><span>${esc(item.label)} × ${item.quantity}</span><b>${money(item.quantity * item.unit_price_cents)}</b></div>`).join("")}` : ""}<p style="margin:16px 0">${esc(tx.note || "No note")}<br><small>Due: ${date(tx.due_at)}</small></p>${tx.has_artifact ? btn(icon("eye") + "View saved consent", "evidence", "wide", `data-id="${tx.id}"`) : tx.type === "utang" ? '<p class="small muted">No consent photo is attached to this historical transaction.</p>' : ""}${tx.voided ? note("Original retained. An offsetting correction was appended to the ledger.") : tx.voids_tx_id ? note("This entry offsets the original transaction.") : ""}${tx.type === "utang" ? `<section class="edit-history"><div class="between"><h3>Edit History</h3><span class="badge">${(tx.edit_history || []).length}</span></div>${history || '<p class="small muted">No edits have been made to this record.</p>'}</section>` : ""}<div class="actions" style="margin-top:20px">${tx.type === "utang" && !tx.voided && !tx.voids_tx_id ? btn(icon("edit") + "Edit Record", "edit-record", "primary", `data-id="${tx.id}"`) : ""}${!tx.voided && !tx.voids_tx_id ? btn("Void / correct", "void", "", `data-id="${tx.id}"`) : ""}${btn("Permanently delete", "delete-tx", "red", `data-id="${tx.id}"`)}</div><div class="hash">Local SHA-256<br>${esc(tx.tx_hash || "Not available")}</div>`,
+    `<h2>Transaction details</h2><p>${esc(customer(tx.customer_id)?.name)} · ${date(tx.created_at)}</p><div class="totals"><div class="between"><span class="badge">${txLabel(tx)}</span><strong style="font-size:25px">${money(tx.amount_cents)}</strong></div><div class="between small"><span>Balance after</span><b>${tx.balance_after_cents < 0 ? "Credit " : ""}${money(tx.balance_after_cents)}</b></div></div>${btn(icon("book") + "View QR receipt", "view-receipt", "primary wide", `style="margin-top:16px" data-id="${tx.id}"`)}${tx.line_items?.length ? `<h3 style="margin:20px 0 10px">Items</h3>${tx.line_items.map((item) => `<div class="between small" style="margin-bottom:10px"><span>${esc(item.label)} × ${item.quantity}</span><b>${money(item.quantity * item.unit_price_cents)}</b></div>`).join("")}` : ""}<p style="margin:16px 0">${esc(tx.note || "No note")}<br><small>Due: ${date(tx.due_at)}</small></p>${tx.has_artifact ? btn(icon("eye") + "View saved consent", "evidence", "wide", `data-id="${tx.id}"`) : tx.type === "utang" ? '<p class="small muted">No consent photo is attached to this historical transaction.</p>' : ""}${tx.voided ? note("Original retained. An offsetting correction was appended to the ledger.") : tx.voids_tx_id ? note("This entry offsets the original transaction.") : ""}${tx.type === "utang" ? `<section class="edit-history"><div class="between"><h3>Edit History</h3><span class="badge">${(tx.edit_history || []).length}</span></div>${history || '<p class="small muted">No edits have been made to this record.</p>'}</section>` : ""}<div class="actions" style="margin-top:20px">${tx.type === "utang" && !tx.voided && !tx.voids_tx_id ? btn(icon("edit") + "Edit Record", "edit-record", "primary", `data-id="${tx.id}"`) : ""}${!tx.voided && !tx.voids_tx_id ? btn("Void / correct", "void", "", `data-id="${tx.id}"`) : ""}${btn("Permanently delete", "delete-tx", "red", `data-id="${tx.id}"`)}</div><div class="hash">Local SHA-256<br>${esc(tx.tx_hash || "Not available")}</div>`,
   );
 }
 function priceModal(label) {
@@ -1113,6 +1538,16 @@ async function action(name, el) {
   switch (name) {
     case "close-dialog":
       closeModal();
+      break;
+    case "view-receipt":
+      closeModal();
+      await showReceipt(el.dataset.id, el.dataset.source);
+      break;
+    case "download-receipt":
+      try { downloadReceipt(); } catch (error) { dialogError(error); }
+      break;
+    case "print-receipt":
+      window.print();
       break;
     case "filter":
       filter = el.dataset.value;
@@ -1180,8 +1615,145 @@ async function action(name, el) {
     case "open-settings":
       go("settings");
       break;
+    case "borrower-portal":
+      go("borrower-portal");
+      break;
+    case "open-borrower-preview":
+      borrowerMappedCustomerId = null;
+      go("borrower-home");
+      break;
+    case "open-mapped-borrower":
+      if (!customer(el.dataset.id)) break;
+      borrowerMappedCustomerId = el.dataset.id;
+      go("borrower-payments");
+      break;
+    case "borrower-account-qr":
+    case "refresh-account-qr":
+      await showBorrowerAccountQr();
+      break;
+    case "copy-account-token":
+      if (!borrowerAccountQr) throw new Error("This Account QR has expired.");
+      await navigator.clipboard.writeText(borrowerAccountQr.token);
+      toast("Manual account-link token copied.");
+      break;
+    case "owner-scan-account-qr":
+      renderOwnerAccountScanner();
+      break;
+    case "use-demo-account-qr": {
+      const saved = JSON.parse(localStorage.getItem("lista-demo-account-token") || "null");
+      if (!saved) throw new Error("Generate an Account QR in the Borrower Portal first.");
+      await reviewAccountLinkToken(saved.token);
+      break;
+    }
+    case "owner-start-account-camera":
+      stopBorrowerScanner();
+      try {
+        borrowerScannerStream = await openCamera({ video: $("#owner-account-video") });
+        scanOwnerAccountFrame();
+      } catch (error) {
+        stopBorrowerScanner();
+        renderOwnerAccountScanner(error.message || "Camera permission was denied or the camera is unavailable.");
+      }
+      break;
+    case "borrower-invite-demo":
+      modal(`<div class="invite-demo"><span class="eyebrow">Invitation preview</span><h2>Invite ${esc(borrowerDemo.borrower.name)} to LISTA</h2><p>A future secure invitation could tell the customer that ${esc(borrowerDemo.store.name)} has shared a private account view.</p><div class="invite-message"><b>Sample message</b><p>“You’re invited to view your LISTA balance, payments, and receipts. Secure access setup would be required before any real records are shown.”</p></div>${note("Preview only. No message was sent, no link was created, and this is not authentication.", "warning")}<button class="btn wide" data-action="close-dialog">Close preview</button></div>`);
+      break;
+    case "borrower-about":
+      modal(`<div class="guide-dialog"><span class="eyebrow">About LISTA</span><h2>One platform, two experiences</h2><p>LISTA helps sari-sari store owners manage utang while giving customers a clear way to review what they owe.</p>${note("This borrower experience is a frontend demonstration with separate sample records. Live customer access, synchronization, and account verification are not available yet.", "warning")}</div>`);
+      break;
+    case "borrower-exit":
+      modal(`<div class="confirm-dialog danger"><span class="confirm-icon">${icon("logout")}</span><span class="eyebrow">Borrower demo</span><h2>Log out of the demo?</h2><p>This clears pending borrower-demo payments and scanned receipts from this session. Store-owner records are not affected.</p><div class="actions"><button class="btn" data-action="close-dialog">Stay signed in</button><button class="btn danger" data-action="confirm-borrower-logout">Log Out</button></div></div>`);
+      break;
+    case "confirm-borrower-logout":
+      stopBorrowerScanner();
+      window.dispatchEvent(new CustomEvent("lista:logout"));
+      break;
+    case "borrower-start-scan":
+      stopBorrowerScanner();
+      borrowerScan = { phase: "scanning", receipt: null, error: "" };
+      render();
+      try {
+        borrowerScannerStream = await openCamera({ video: $("#borrower-scanner-video") });
+        scanBorrowerVideoFrame();
+      } catch (error) {
+        borrowerScan.phase = "error";
+        borrowerScan.error = error.message || "Camera permission was denied or the camera is unavailable.";
+        stopBorrowerScanner();
+        render();
+      }
+      break;
+    case "borrower-clear-scan":
+      borrowerScan = { phase: "idle", receipt: null, error: "" };
+      stopBorrowerScanner();
+      render();
+      break;
+    case "borrower-confirm-import":
+      try {
+        borrowerScannedReceipts = addScannedReceipt(borrowerScannedReceipts, borrowerScan.receipt);
+        borrowerScan = { phase: "idle", receipt: null, error: "" };
+        go("borrower-receipts");
+        toast("Unverified receipt added to the borrower demo.");
+      } catch (error) {
+        borrowerScan.error = error.message || "The receipt could not be imported.";
+        render();
+      }
+      break;
+    case "confirm-borrower-payment":
+      try { await showBorrowerPaymentQr(); }
+      catch (error) { dialogError(error); }
+      break;
+    case "download-payment-qr": {
+      const canvas = $("#borrower-payment-qr");
+      if (!canvas || !borrowerPaymentQr) return dialogError(Error("Payment QR is unavailable."));
+      canvas.toBlob((blob) => blob ? downloadBlob(blob, `LISTA-payment-request-${borrowerPaymentQr.request.requestId}.png`) : dialogError(Error("Payment QR could not be downloaded.")), "image/png");
+      break;
+    }
+    case "owner-scan-payment-qr":
+      ownerPaymentScan = null;
+      renderOwnerPaymentScanner();
+      break;
+    case "use-demo-payment-qr": {
+      const payload = localStorage.getItem("lista-demo-payment-qr");
+      if (!payload) throw new Error("Generate a Payment QR in the Borrower Portal first.");
+      reviewOwnerPaymentQr(payload);
+      break;
+    }
+    case "owner-start-payment-camera":
+      stopBorrowerScanner();
+      try {
+        borrowerScannerStream = await openCamera({ video: $("#owner-payment-video") });
+        scanOwnerPaymentFrame();
+      } catch (error) {
+        stopBorrowerScanner();
+        renderOwnerPaymentScanner(error.message || "Camera permission was denied or the camera is unavailable.");
+      }
+      break;
+    case "owner-confirm-payment-qr": {
+      if (!ownerPaymentScan || busy) break;
+      busy = true;
+      const { request } = ownerPaymentScan;
+      const button = el; button.disabled = true;
+      try {
+        validatePaymentRequest(request, { storeId, customers: model.getState().customers, transactions: model.getState().transactions, processedRequestIds: processedPaymentRequestIds });
+        const saved = await model.addTransaction({ customerId: request.customerId, type: "payment", amountCents: request.amountCents, note: `QR ${request.method}${request.externalReference ? ` · Ref ${request.externalReference}` : ""}` });
+        processedPaymentRequestIds.add(request.requestId);
+        if (demoMode) localStorage.setItem("lista-demo-processed-payments", JSON.stringify([...processedPaymentRequestIds]));
+        lastSaved = saved;
+        cid = request.customerId;
+        ownerPaymentScan = null;
+        closeModal();
+        go("success");
+      } catch (error) {
+        dialogError(error);
+        button.disabled = false;
+      } finally { busy = false; }
+      break;
+    }
     case "add-customer":
-      addCustomer();
+      chooseAddCustomer();
+      break;
+    case "add-customer-manual":
+      addCustomerManual();
       break;
     case "new-utang":
       draft = null;
@@ -1563,8 +2135,7 @@ async function action(name, el) {
       );
       break;
     case "logout":
-      sessionStorage.removeItem("lista-authenticated");
-      location.replace(location.pathname + location.search);
+      window.dispatchEvent(new CustomEvent("lista:logout"));
       break;
     case "pin":
       pinModal();
@@ -1795,6 +2366,15 @@ function bind() {
 function readRoute() {
   const parts = location.hash.slice(1).split("/");
   const next = parts[0] || "home";
+  if (sessionStorage.getItem("lista-role") === "borrower" && !borrowerRoutes.has(next)) {
+    if (location.hash !== "#borrower-home") location.replace(location.pathname + location.search + "#borrower-home");
+    return;
+  }
+  if (sessionStorage.getItem("lista-role") === "owner" && (borrowerRoutes.has(next) || next === "borrower-portal")) {
+    if (location.hash !== "#home") location.replace(location.pathname + location.search + "#home");
+    return;
+  }
+  if (route === "borrower-scan" && next !== "borrower-scan") stopBorrowerScanner();
   if (route === "consent" && next !== "consent" && next !== "record")
     clearConsent();
   if (next === "record" && route !== "record" && route !== "consent")
@@ -1816,6 +2396,11 @@ function readRoute() {
       "verify",
       "prices",
       "edit",
+      "borrower-portal",
+      "borrower-home",
+      "borrower-utang",
+      "borrower-payments",
+      "borrower-receipts",
     ].includes(next)
   )
     if (next !== "edit") cid = null;
@@ -1827,6 +2412,7 @@ window.addEventListener("pagehide", () => {
   if (cameraStream) stopCamera(cameraStream, $("#camera-video"));
   cameraStream = null;
   cameraActive = false;
+  stopBorrowerScanner();
 });
 await model.ready;
 loading = false;

@@ -65,6 +65,13 @@ test('permission denial is surfaced and never leaves a camera stream attached', 
   assert.equal(video.srcObject, null);
 });
 
+test('unsupported browsers receive a clear camera-unavailable error', async () => {
+  const { openCamera } = await loadCamera();
+  const video = fakeVideo();
+  await assert.rejects(openCamera({ video, mediaDevices: {} }), /Camera capture is unavailable/);
+  assert.equal(video.srcObject, null);
+});
+
 test('a stream is stopped and detached when no usable video frame arrives', async () => {
   const { openCamera } = await loadCamera();
   const video = fakeVideo({ readyState: 1, videoWidth: 0, videoHeight: 0 });

@@ -98,7 +98,7 @@ test("consent signature canvas receives the responsive, touch-safe signature pad
 test("Astra visual stylesheet matches the approved LISTA enhancement baseline", () => {
   assert.equal(
     sha256(css),
-    "e3007b1f2932592b86dd8d9d92e7c7e565fb1ab1756515f9362209546d016cc3",
+    "38ff8f7d1ead0d64668434d6e26be76baaf92dd84ed89876fa7ede144316b9ca",
   );
 });
 
@@ -125,25 +125,97 @@ test("real ledger metadata does not identify the page as a sample ledger", () =>
 test("live screen copy does not promise fake sample/demo behavior", () => {
   assert.doesNotMatch(
     app,
-    /sample ledger|sample data|fictional|simulated presenter|synthetic photo|prototype simulation/i,
+    /sample ledger|fictional|simulated presenter|synthetic photo|prototype simulation/i,
   );
+  assert.match(app, /preview uses separate sample data/i);
+  assert.match(app, /standalone preview uses separate sample data/i);
+  assert.match(app, /functional local QR handoff/i);
 });
 
 test("More provides a logout action that returns to the welcome screen", () => {
   assert.match(app, /settingsRow\("logout", "Log out"/);
   assert.match(app, /case "logout"/);
-  assert.match(app, /sessionStorage\.removeItem\("lista-authenticated"\)/);
-  assert.match(app, /location\.replace\(location\.pathname \+ location\.search\)/);
+  assert.match(app, /CustomEvent\("lista:logout"\)/);
+  assert.match(reactApp, /await authService\.logout\(\)/);
+  assert.match(reactApp, /sessionStorage\.removeItem\('lista-authenticated'\)/);
+  assert.match(reactApp, /window\.location\.replace\(window\.location\.pathname \+ window\.location\.search\)/);
 });
 
 test("Settings subpages return to the current Settings screen with logout", () => {
   assert.match(app, /function settings\(\)[\s\S]*settingsRow\("logout", "Log out"/);
   assert.match(app, /back\("Price Book", "settings"\)/);
   assert.match(app, /\["prices", "verify"\]\.includes\(route\) \? "settings" : "home"/);
-  assert.match(reactApp, /sessionStorage\.getItem\('lista-authenticated'\)/);
-  assert.match(reactApp, /onContinue=\{authenticate\}/);
-  assert.match(reactApp, /pageshow/);
-  assert.match(reactApp, /popstate/);
+  assert.match(reactApp, /authService\.current\(\)/);
+  assert.match(reactApp, /onContinue=\{login\}/);
+  assert.match(reactApp, /authService\.onChange/);
+});
+
+test("Borrower experience is isolated with borrower-only navigation", () => {
+  assert.doesNotMatch(app, /settingsRow\("people", "Preview Borrower Experience"/);
+  assert.match(app, /function borrowerPortal\(\)/);
+  assert.match(app, /function borrowerShell\(content\)/);
+  assert.match(app, /Home[\s\S]*My Utang[\s\S]*Payments[\s\S]*Receipts/);
+  assert.match(app, /createBorrowerPortalDemo/);
+  const borrowerShell = app.match(/function borrowerShell\(content\)[\s\S]*?\n}/)?.[0] || "";
+  assert.doesNotMatch(borrowerShell, /Record utang|Price Book|Settings|delete-tx|edit-record/);
+  assert.match(app, /sessionStorage\.getItem\("lista-role"\) === "owner" && \(borrowerRoutes\.has\(next\) \|\| next === "borrower-portal"\)/);
+});
+
+test("Add Person consolidates manual creation and borrower QR linking", () => {
+  const quickActions = app.match(/<div class="quick-actions">[\s\S]*?<\/div><\/section>/)?.[0] || "";
+  assert.match(quickActions, /Add Utang/);
+  assert.match(quickActions, /Record Payment/);
+  assert.match(quickActions, /Add Person/);
+  assert.doesNotMatch(quickActions, /Link Borrower/);
+  assert.match(app, /function chooseAddCustomer\(\)/);
+  assert.match(app, /Add Manually/);
+  assert.match(app, /Scan Borrower QR/);
+  assert.match(app, /case "add-customer-manual"/);
+  assert.match(app, /case "owner-scan-account-qr"/);
+  assert.match(app, /add-person-options/);
+  assert.match(app, /Add a customer without a LISTA account\./);
+  assert.match(app, /Link a borrower using their LISTA Account QR\./);
+  assert.match(css.toString(), /dialog\.add-person-dialog\{width:min\(460px,calc\(100% - 32px\)\)/);
+  assert.match(css.toString(), /\.add-person-option\{display:flex;width:100%;min-height:92px/);
+  assert.match(css.toString(), /\.add-person-option:hover/);
+  assert.match(css.toString(), /\.add-person-option:active/);
+});
+
+test("welcome offers first-class owner and borrower roles without fake borrower authentication", () => {
+  assert.match(reactApp, /Continue as Store Owner/);
+  assert.match(reactApp, /Continue as Borrower/);
+  assert.match(reactApp, /An easy way for sari-sari stores to manage utang and for customers to keep track of what they owe/);
+  assert.match(reactApp, /sessionStorage\.setItem\('lista-role', profile\.role\)/);
+  assert.match(reactApp, /profile\.role === 'owner' \? 'home' : 'borrower-home'/);
+  assert.match(reactApp, /authService\.login/);
+  assert.match(reactApp, /authService\.register/);
+  assert.match(app, /sessionStorage\.getItem\("lista-role"\) === "borrower" && !borrowerRoutes\.has\(next\)/);
+  assert.match(app, /<b>Log Out<\/b>/);
+  assert.match(app, /case "confirm-borrower-logout"/);
+  assert.doesNotMatch(reactApp, /borrower-password|verifyBorrower|authenticateBorrower/);
+});
+
+test("demo portal selection happens only at login and no authenticated switcher remains", () => {
+  assert.match(reactApp, /isDemoCredentials\(credentials\.email, credentials\.password\)[\s\S]*enterDemo\(selectedRole\)/);
+  assert.doesNotMatch(app, /switch-demo-portal|demoPortalSwitcher|Portal · Switch/);
+  assert.doesNotMatch(reactApp, /switch-demo-portal|demoPortalSwitcher|Portal · Switch/);
+});
+
+test("borrower has five tabs, receipt scanning, and owner-confirmed payment QR handoff", () => {
+  assert.match(app, /Home[\s\S]*My Utang[\s\S]*borrower-scan[\s\S]*Scan QR[\s\S]*Payments[\s\S]*Receipts/);
+  assert.match(app, /borrower-scan-circle/);
+  assert.match(app, /Use camera/);
+  assert.match(app, /Choose image/);
+  assert.match(app, /parseListaReceiptPayload/);
+  assert.match(app, /addScannedReceipt/);
+  assert.match(app, /Review & Generate QR/);
+  assert.match(app, /GCash[\s\S]*Maya[\s\S]*Bank Transfer/);
+  assert.match(app, /createPaymentQrPayload/);
+  assert.match(app, /Scan Payment QR/);
+  assert.match(app, /owner-confirm-payment-qr/);
+  assert.match(app, /validatePaymentRequest/);
+  assert.match(app, /model\.addTransaction\(\{ customerId: request\.customerId, type: "payment"/);
+  assert.doesNotMatch(app, /payment gateway connected|money was transferred|verified payment/i);
 });
 
 test("Smart Import appends reviewed mock items without bypassing consent", () => {
